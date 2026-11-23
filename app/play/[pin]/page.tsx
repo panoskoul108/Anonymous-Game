@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X } from "lucide-react";
+import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X, EyeOff } from "lucide-react";
 
 const AVATARS = ["🦊", "🐺", "🦁", "🐼", "🦄", "🐙", "🔥", "⚡", "🎭", "🍸", "🪩", "👾"];
+const REACTIONS = ["😂", "👀", "🤯", "❤️", "🔥"];
 
 export default function PlayerRoomPage() {
   const params = useParams<{ pin: string }>();
@@ -15,6 +16,8 @@ export default function PlayerRoomPage() {
   const [player, setPlayer] = useState<any>(null);
   const [round, setRound] = useState<any>(null);
   const [question, setQuestion] = useState<any>(null);
+  const [players, setPlayers] = useState<any[]>([]);
+  const [answers, setAnswers] = useState<any[]>([]);
 
   // Join form
   const [nickname, setNickname] = useState("");
@@ -35,8 +38,20 @@ export default function PlayerRoomPage() {
 
   const storageKey = useMemo(() => `anon_reveal_player_${pin}`, [pin]);
 
+  const playerMap = useMemo(() => {
+    const map: Record<string, any> = {};
+    for (const p of players) map[p.id] = p;
+    return map;
+  }, [players]);
+
   const loadGameState = useCallback(async (roomData: any, currentPlayer: any) => {
     if (!roomData) return;
+
+    const { data: pList } = await supabase
+      .from("players")
+      .select("id, nickname, avatar")
+      .eq("room_id", roomData.id);
+    setPlayers(pList || []);
 
     if (roomData.current_round_id) {
       const { data: roundData } = await supabase
@@ -55,24 +70,23 @@ export default function PlayerRoomPage() {
         setQuestion(qData || null);
       }
 
-      if (currentPlayer?.id && roundData?.id) {
-        const { data: existingAns } = await supabase
-          .from("public_answers")
-          .select("id")
-          .eq("round_id", roundData.id)
-          .eq("player_id", currentPlayer.id)
-          .maybeSingle();
+      const { data: ansData } = await supabase
+        .from("public_answers")
+        .select("*")
+        .eq("round_id", roomData.current_round_id)
+        .order("created_at", { ascending: true });
+      setAnswers(ansData || []);
 
-        // Σημείωση: το public_answers δείχνει player_id μόνο αν revealed_correct,
-        // οπότε κρατάμε και τοπικό flag ανά roundId στο localStorage
+      if (currentPlayer?.id && roundData?.id) {
         const localFlag = localStorage.getItem(`answered_round_${roundData.id}_${currentPlayer.id}`);
-        setHasSubmittedCurrentRound(Boolean(existingAns || localFlag));
+        setHasSubmittedCurrentRound(Boolean(localFlag));
       } else {
         setHasSubmittedCurrentRound(false);
       }
     } else {
       setRound(null);
       setQuestion(null);
+      setAnswers([]);
       setHasSubmittedCurrentRound(false);
       setAnswerText("");
     }
@@ -86,7 +100,7 @@ export default function PlayerRoomPage() {
       .single();
 
     if (error || !roomData) {
-      setErrorMsg("Δεν βρέθηκε δωμάτιο με αυτό το PIN.");
+      setErrorMsg("Room not found. Check the PIN and try again.");
       return;
     }
 
@@ -124,7 +138,7 @@ export default function PlayerRoomPage() {
   useEffect(() => {
     if (!room?.id) return;
 
-    const channel = supabase
+    const dbChannel = supabase
       .channel(`player-room-${room.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: `id=eq.${room.id}` }, async (payload: any) => {
         const updatedRoom = payload.new || room;
@@ -135,6 +149,16 @@ export default function PlayerRoomPage() {
         }
         await loadGameState(updatedRoom, player);
       })
+      .on("postgres_changes", { event: "*", schema: "public", table: "rounds", filter: `room_id=eq.${room.id}` }, async () => {
+        await loadGameState(room, player);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "public_answers", filter: `room_id=eq.${room.id}` }, async () => {
+        await loadGameState(room, player);
+      })
+      .subscribe();
+
+    const broadcastChannel = supabase
+      .channel(`game:${pin}`)
       .on("broadcast", { event: "*" }, async () => {
         const { data: freshRoom } = await supabase.from("rooms").select("*").eq("id", room.id).single();
         if (freshRoom) {
@@ -145,9 +169,10 @@ export default function PlayerRoomPage() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      supabase.removeChannel(dbChannel);
+      supabase.removeChannel(broadcastChannel);
     };
-  }, [room?.id, player, loadGameState]);
+  }, [room?.id, pin, player, loadGameState]);
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -172,7 +197,7 @@ export default function PlayerRoomPage() {
     setJoining(false);
 
     if (error || !newPlayer) {
-      setErrorMsg(error?.message || "Αποτυχία σύνδεσης στο δωμάτιο");
+      setErrorMsg(error?.message || "Failed to join room");
       return;
     }
 
@@ -220,6 +245,18 @@ export default function PlayerRoomPage() {
     setAnswerText("");
   };
 
+  const handleSendReaction = async (emoji: string) => {
+    if (!pin) return;
+    const ch = supabase.channel(`game:${pin}`);
+    await ch.subscribe();
+    await ch.send({
+      type: "broadcast",
+      event: "live_reaction",
+      payload: { emoji },
+    });
+    supabase.removeChannel(ch);
+  };
+
   const handleSuggestQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!room || !suggestText.trim()) return;
@@ -240,6 +277,14 @@ export default function PlayerRoomPage() {
       }, 1200);
     }
   };
+
+  const activeAnswer = useMemo(() => {
+    if (answers.length === 0) return null;
+    if (round?.active_answer_id) {
+      return answers.find((a) => a.id === round.active_answer_id) || answers[0];
+    }
+    return answers[0];
+  }, [answers, round]);
 
   return (
     <main className="min-h-screen p-4 flex flex-col justify-between max-w-md mx-auto bg-[radial-gradient(circle_at_top,_rgba(236,72,153,0.18),_transparent_55%)]">
@@ -274,16 +319,16 @@ export default function PlayerRoomPage() {
           </div>
         )}
 
-        {/* Step 1: Join Room (Nickname + Avatar) */}
+        {/* Step 1: Join Room */}
         {room && !player && (
           <form
             onSubmit={handleJoin}
             className="rounded-3xl bg-[#130b29] border border-fuchsia-500/35 p-6 space-y-5 shadow-2xl"
           >
             <div>
-              <h1 className="text-2xl font-black text-white">Μπες στο Δωμάτιο</h1>
+              <h1 className="text-2xl font-black text-white">Join the Room</h1>
               <p className="text-xs text-purple-200/75 mt-1">
-                Διάλεξε nickname και avatar για το παιχνίδι.
+                Pick a nickname and avatar to play.
               </p>
             </div>
 
@@ -297,7 +342,7 @@ export default function PlayerRoomPage() {
                 required
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
-                placeholder="Το όνομά σου / παρατσούκλι"
+                placeholder="Your name or nickname"
                 className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-400"
               />
             </div>
@@ -329,7 +374,7 @@ export default function PlayerRoomPage() {
               disabled={joining}
               className="w-full py-3.5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 cursor-pointer"
             >
-              {joining ? "Σύνδεση..." : "Είσοδος στο Παιχνίδι"}
+              {joining ? "Joining..." : "Enter Game"}
             </button>
           </form>
         )}
@@ -342,7 +387,7 @@ export default function PlayerRoomPage() {
                 <span className="text-2xl">{player.avatar}</span>
                 <div>
                   <div className="text-sm font-bold text-white">{player.nickname}</div>
-                  <div className="text-[11px] text-lime-400">● Συνδεδεμένος</div>
+                  <div className="text-[11px] text-lime-400">● Connected</div>
                 </div>
               </div>
               <span className="text-xs uppercase font-bold text-cyan-300">
@@ -366,56 +411,102 @@ export default function PlayerRoomPage() {
                   <div className="rounded-2xl bg-[#090514] border border-purple-500/25 p-5 text-center space-y-2">
                     <Clock className="w-6 h-6 text-cyan-300 mx-auto" />
                     <p className="text-sm font-semibold text-purple-200">
-                      Σε αυτόν τον γύρο απαντούν επιλεγμένοι παίκτες.
+                      Only selected players are answering this round.
                     </p>
                     <p className="text-xs text-purple-300/60">
-                      Κοίτα την κεντρική οθόνη και ετοιμάσου για μαντεψιές!
+                      Watch the main screen and get ready to guess!
                     </p>
                   </div>
                 ) : hasSubmittedCurrentRound ? (
                   <div className="rounded-2xl bg-lime-400/15 border border-lime-400/40 p-5 text-center space-y-2">
                     <CheckCircle2 className="w-7 h-7 text-lime-400 mx-auto" />
                     <p className="text-sm font-bold text-lime-200">
-                      Η απάντησή σου στάλθηκε ανώνυμα!
+                      Answer submitted in secret!
                     </p>
                     <p className="text-xs text-purple-200/70">
-                      Περίμενε να ολοκληρωθούν οι υπόλοιπες απαντήσεις.
+                      Waiting for everyone else to finish...
                     </p>
                   </div>
                 ) : (
-                  <form onSubmit={handleSubmitAnswer} className="space-y-4">
+                  <form onSubmit={handleSubmitAnswer} className="space-y-3">
                     <textarea
                       rows={4}
+                      maxLength={240}
                       required
                       value={answerText}
                       onChange={(e) => setAnswerText(e.target.value)}
-                      placeholder="Γράψε την απάντησή σου μυστικά..."
+                      placeholder="Type your secret answer..."
                       className="w-full rounded-2xl bg-[#090514] border border-purple-500/35 p-4 text-sm text-white focus:outline-none focus:border-cyan-400"
                     />
+                    <div className="text-right text-[11px] text-purple-300/50">
+                      {answerText.length} / 240
+                    </div>
                     {errorMsg && (
                       <p className="text-xs text-rose-300">{errorMsg}</p>
                     )}
                     <button
                       type="submit"
-                      disabled={submittingAnswer}
-                      className="w-full py-3.5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 flex items-center justify-center gap-2 cursor-pointer"
+                      disabled={submittingAnswer || !answerText.trim()}
+                      className="w-full py-3.5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer"
                     >
                       <Send className="w-4 h-4" />
-                      {submittingAnswer ? "Αποστολή..." : "Submit Answer"}
+                      {submittingAnswer ? "Sending..." : "Submit Secret Answer"}
                     </button>
                   </form>
                 )}
+              </div>
+            ) : (room.status === "discussing" || room.status === "revealed") && activeAnswer ? (
+              <div className="rounded-3xl bg-[#130b29] border border-fuchsia-500/35 p-6 space-y-4 text-center">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-cyan-300">
+                  On Screen Now
+                </span>
+                <p className="text-lg font-black text-white leading-snug">
+                  &ldquo;{activeAnswer.content}&rdquo;
+                </p>
+
+                {activeAnswer.reveal_status === "revealed_correct" ? (
+                  <div className="inline-flex items-center gap-2 rounded-xl bg-lime-400/20 border border-lime-400 px-4 py-2 text-sm font-bold text-lime-200">
+                    <span>{playerMap[activeAnswer.player_id]?.avatar}</span>
+                    <span>{playerMap[activeAnswer.player_id]?.nickname}</span>
+                  </div>
+                ) : activeAnswer.reveal_status === "kept_anonymous" ? (
+                  <div className="inline-flex items-center gap-1.5 rounded-xl bg-rose-500/20 border border-rose-400/40 px-4 py-2 text-xs font-bold text-rose-200">
+                    <EyeOff className="w-4 h-4" />
+                    Wrong Guess — Kept Anonymous!
+                  </div>
+                ) : (
+                  <p className="text-xs text-purple-200/75">
+                    Discuss with the group &amp; play the 50-50 ball!
+                  </p>
+                )}
+
+                {/* Anonymous Live Reactions */}
+                <div className="pt-2 border-t border-purple-500/20">
+                  <div className="text-[11px] text-purple-300/60 mb-2">
+                    Send anonymous reaction to Big Screen
+                  </div>
+                  <div className="flex justify-center gap-2">
+                    {REACTIONS.map((emoji) => (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => handleSendReaction(emoji)}
+                        className="w-11 h-11 rounded-xl bg-[#090514] hover:bg-purple-900/50 border border-purple-500/25 text-xl active:scale-90 transition cursor-pointer"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="rounded-3xl bg-[#130b29] border border-purple-500/30 p-7 text-center space-y-3">
                 <Sparkles className="w-8 h-8 text-cyan-300 mx-auto" />
                 <h2 className="text-lg font-bold text-white">
-                  {room.status === "lobby"
-                    ? "Είσαι μέσα στο Lobby!"
-                    : "Συζήτηση & Reveal στη μεγάλη οθόνη"}
+                  You&apos;re in the Lobby!
                 </h2>
                 <p className="text-xs text-purple-200/75 leading-relaxed">
-                  Παρακολούθησε το Big Screen, συζήτησε με την παρέα και ετοιμάσου για το 50-50 μπαλάκι.
+                  Watch the main screen. When the host launches a round, the question will appear right here.
                 </p>
               </div>
             )}
@@ -447,31 +538,31 @@ export default function PlayerRoomPage() {
 
             {suggestSent ? (
               <div className="rounded-2xl bg-lime-400/15 border border-lime-400/40 p-4 text-sm text-lime-200 text-center">
-                Η πρότασή σου στάλθηκε ανώνυμα στον Host!
+                Sent anonymously to the Host!
               </div>
             ) : (
               <form onSubmit={handleSuggestQuestion} className="space-y-4">
                 <div>
-                  <label className="block text-xs text-purple-200/80 mb-1.5">Κατηγορία</label>
+                  <label className="block text-xs text-purple-200/80 mb-1.5">Category</label>
                   <select
                     value={suggestCategory}
                     onChange={(e) => setSuggestCategory(e.target.value as any)}
                     className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-3.5 py-2.5 text-sm text-white"
                   >
-                    <option value="flirting">😏 Flirting & Attraction</option>
-                    <option value="spicy">🌶️ Spicy & Dating</option>
-                    <option value="funny">😂 Funny & Unexpected</option>
+                    <option value="flirting">😏 Flirting &amp; Attraction</option>
+                    <option value="spicy">🌶️ Spicy &amp; Dating</option>
+                    <option value="funny">😂 Funny &amp; Unexpected</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-xs text-purple-200/80 mb-1.5">Η ερώτησή σου</label>
+                  <label className="block text-xs text-purple-200/80 mb-1.5">Your Question</label>
                   <textarea
                     rows={3}
                     required
                     value={suggestText}
                     onChange={(e) => setSuggestText(e.target.value)}
-                    placeholder="Γράψε μια ερώτηση για την παρέα..."
+                    placeholder="Write a spicy or funny question for the group..."
                     className="w-full rounded-xl bg-[#090514] border border-purple-500/30 p-3 text-sm text-white"
                   />
                 </div>
@@ -480,7 +571,7 @@ export default function PlayerRoomPage() {
                   type="submit"
                   className="w-full py-3 rounded-xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 to-cyan-400 cursor-pointer"
                 >
-                  Ανώνυμη Υποβολή
+                  Submit Anonymously
                 </button>
               </form>
             )}

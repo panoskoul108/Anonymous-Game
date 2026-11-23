@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin", "greek"] });
+const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "ANONYMOUS REVEAL",
@@ -15,7 +15,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="el" className="dark">
+    <html lang="en" className="dark">
       <body className={`${inter.className} min-h-screen bg-[#090514] text-white antialiased`}>
         {children}
       </body>

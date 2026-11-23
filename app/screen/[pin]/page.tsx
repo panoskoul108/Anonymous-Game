@@ -8,6 +8,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
 import { Sparkles, EyeOff, CheckCircle2, Users } from "lucide-react";
 
+interface FloatingReaction {
+  id: string;
+  emoji: string;
+  left: number;
+}
+
 export default function BigScreenPage() {
   const params = useParams<{ pin: string }>();
   const pin = params.pin;
@@ -18,6 +24,7 @@ export default function BigScreenPage() {
   const [players, setPlayers] = useState<any[]>([]);
   const [answers, setAnswers] = useState<any[]>([]);
   const [joinUrl, setJoinUrl] = useState<string>("");
+  const [reactions, setReactions] = useState<FloatingReaction[]>([]);
 
   useEffect(() => {
     if (typeof window !== "undefined" && pin) {
@@ -65,7 +72,6 @@ export default function BigScreenPage() {
         setQuestion(qData || null);
       }
 
-      // Διαβάζουμε ΜΟΝΟ από το public_answers view για απόλυτη ασφάλεια ανωνυμίας
       const { data: ansData } = await supabase
         .from("public_answers")
         .select("*")
@@ -83,7 +89,6 @@ export default function BigScreenPage() {
     loadScreenData();
   }, [loadScreenData]);
 
-  // Realtime sync + Broadcast channel
   useEffect(() => {
     if (!room?.id) return;
 
@@ -108,12 +113,22 @@ export default function BigScreenPage() {
       .on("broadcast", { event: "reveal_result" }, (msg: any) => {
         if (msg?.payload?.isCorrect) {
           confetti({
-            particleCount: 90,
-            spread: 75,
+            particleCount: 100,
+            spread: 80,
             origin: { y: 0.6 },
           });
         }
         loadScreenData();
+      })
+      .on("broadcast", { event: "live_reaction" }, (msg: any) => {
+        const emoji = msg?.payload?.emoji;
+        if (!emoji) return;
+        const id = `${Date.now()}-${Math.random()}`;
+        const left = 12 + Math.floor(Math.random() * 76);
+        setReactions((prev) => [...prev.slice(-20), { id, emoji, left }]);
+        setTimeout(() => {
+          setReactions((prev) => prev.filter((r) => r.id !== id));
+        }, 2600);
       })
       .on("broadcast", { event: "*" }, () => {
         loadScreenData();
@@ -142,7 +157,26 @@ export default function BigScreenPage() {
   const status = room?.status || "lobby";
 
   return (
-    <main className="min-h-screen p-6 md:p-10 flex flex-col justify-between bg-[radial-gradient(circle_at_top,_rgba(236,72,153,0.18),_transparent_55%),radial-gradient(circle_at_bottom_left,_rgba(34,211,238,0.14),_transparent_50%)]">
+    <main className="relative min-h-screen p-6 md:p-10 flex flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(236,72,153,0.2),_transparent_55%),radial-gradient(circle_at_bottom_left,_rgba(34,211,238,0.15),_transparent_50%)]">
+      {/* Floating Anonymous Reactions */}
+      <div className="pointer-events-none fixed inset-0 z-40 overflow-hidden">
+        <AnimatePresence>
+          {reactions.map((r) => (
+            <motion.div
+              key={r.id}
+              initial={{ opacity: 0, y: "88vh", scale: 0.6 }}
+              animate={{ opacity: [0, 1, 1, 0], y: "18vh", scale: 1.35 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 2.5, ease: "easeOut" }}
+              style={{ left: `${r.left}%` }}
+              className="absolute text-5xl"
+            >
+              {r.emoji}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
       {/* Header */}
       <header className="flex items-center justify-between border-b border-purple-500/20 pb-4">
         <div className="flex items-center gap-3">
@@ -172,11 +206,11 @@ export default function BigScreenPage() {
               Answer in secret. Guess who wrote it. Reveal the truth.
             </p>
             <h1 className="text-4xl md:text-6xl font-black leading-tight text-white">
-              Σκάναρε & μπες στο παιχνίδι
+              Scan &amp; Join the Game
             </h1>
             <p className="text-lg text-purple-200/80">
-              Άνοιξε την κάμερα στο κινητό σου ή πήγαινε στο{" "}
-              <span className="text-cyan-300 font-semibold">/play</span> και βάλε το PIN{" "}
+              Scan the QR code with your phone camera or go to{" "}
+              <span className="text-cyan-300 font-semibold">/play</span> and enter PIN{" "}
               <span className="text-pink-400 font-black">{pin}</span>.
             </p>
 
@@ -192,7 +226,7 @@ export default function BigScreenPage() {
               ))}
               {players.length === 0 && (
                 <div className="text-purple-300/60 text-base">
-                  Περιμένουμε τους πρώτους παίκτες...
+                  Waiting for players to join...
                 </div>
               )}
             </div>
@@ -200,7 +234,7 @@ export default function BigScreenPage() {
 
           <div className="md:col-span-5 flex flex-col items-center justify-center rounded-3xl bg-[#130b29] border border-fuchsia-500/40 p-8 shadow-2xl">
             <div className="bg-white p-4 rounded-2xl">
-              {joinUrl && <QRCodeSVG value={joinUrl} size={210} />}
+              {joinUrl && <QRCodeSVG value={joinUrl} size={220} />}
             </div>
             <div className="mt-4 text-center">
               <div className="text-xs uppercase tracking-widest text-purple-300/70">Room PIN</div>
@@ -225,7 +259,7 @@ export default function BigScreenPage() {
 
           <div className="rounded-3xl bg-[#130b29] border border-cyan-400/30 p-6 max-w-md mx-auto">
             <div className="text-sm uppercase tracking-wider text-purple-300/80 mb-1">
-              Απαντήσεις που έχουν σταλεί
+              Answers Submitted
             </div>
             <div className="text-5xl font-black text-lime-400">
               {answers.length} <span className="text-2xl text-purple-300/60">/ {expectedCount}</span>
@@ -257,7 +291,7 @@ export default function BigScreenPage() {
                 className="rounded-3xl bg-[#130b29] border-2 border-fuchsia-500/40 p-8 md:p-12 text-center shadow-2xl"
               >
                 <p className="text-3xl sm:text-5xl font-black text-white leading-snug mb-8">
-                  «{activeAnswer.content}»
+                  &ldquo;{activeAnswer.content}&rdquo;
                 </p>
 
                 {activeAnswer.reveal_status === "revealed_correct" ? (
@@ -274,14 +308,14 @@ export default function BigScreenPage() {
                   <div className="inline-flex items-center gap-3 rounded-2xl bg-rose-500/20 border border-rose-400/40 px-6 py-3 text-rose-200">
                     <EyeOff className="w-6 h-6" />
                     <span className="text-xl font-bold">
-                      Λανθασμένη μαντεψιά — Παραμένει ανώνυμο!
+                      Wrong Guess — Identity Stays Secret!
                     </span>
                   </div>
                 ) : (
                   <div className="inline-flex items-center gap-3 rounded-2xl bg-purple-950/80 border border-purple-400/30 px-6 py-3 text-purple-200">
                     <EyeOff className="w-6 h-6 text-pink-400" />
                     <span className="text-xl font-bold">
-                      Ποιος το έγραψε; 50-50 Μπαλάκι!
+                      Who wrote this? Play the 50-50 Ball!
                     </span>
                   </div>
                 )}
@@ -326,7 +360,7 @@ export default function BigScreenPage() {
       {/* Footer */}
       <footer className="pt-4 border-t border-purple-500/15 flex items-center justify-between text-xs text-purple-300/60">
         <span>30+ Players Real-Time Multiplayer</span>
-        <span>Status: {status.toUpperCase()}</span>
+        <span>Phase: {status.toUpperCase()}</span>
       </footer>
     </main>
   );

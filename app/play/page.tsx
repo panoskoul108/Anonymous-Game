@@ -10,7 +10,7 @@ export default function PlayEntryPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanPin = pin.trim();
+    const cleanPin = pin.replace(/\D/g, "").trim();
     if (!cleanPin) return;
     router.push(`/play/${cleanPin}`);
   };
@@ -25,7 +25,7 @@ export default function PlayEntryPage() {
           </div>
           <h1 className="text-3xl font-black text-white">ANONYMOUS REVEAL</h1>
           <p className="text-xs text-purple-200/75">
-            Βάλε το 6-ψήφιο PIN που φαίνεται στην κεντρική οθόνη.
+            Enter the 6-digit PIN shown on the main screen.
           </p>
         </div>
 
@@ -35,17 +35,19 @@ export default function PlayEntryPage() {
             inputMode="numeric"
             maxLength={6}
             required
+            autoFocus
             value={pin}
-            onChange={(e) => setPin(e.target.value)}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
             placeholder="123456"
             className="w-full text-center text-3xl font-black tracking-[0.3em] rounded-2xl bg-[#090514] border border-purple-500/35 px-4 py-4 text-cyan-300 placeholder:text-purple-500/30 focus:outline-none focus:border-cyan-400"
           />
 
           <button
             type="submit"
-            className="w-full py-3.5 px-5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 flex items-center justify-center gap-2 cursor-pointer"
+            disabled={pin.length < 4}
+            className="w-full py-3.5 px-5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 disabled:opacity-40 flex items-center justify-center gap-2 cursor-pointer"
           >
-            Συνέχεια
+            Continue
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>

@@ -43,7 +43,7 @@ export default function HostLoginPage() {
           ANONYMOUS REVEAL
         </h1>
         <p className="text-sm text-purple-200/70 mt-1 mb-6">
-          Συνδέσου ως Host για να δημιουργήσεις δωμάτιο και να ελέγχεις το παιχνίδι.
+          Sign in as Host to create a room and control the game.
         </p>
 
         <form onSubmit={handleLogin} className="space-y-4">
@@ -63,7 +63,7 @@ export default function HostLoginPage() {
 
           <div>
             <label className="block text-xs font-medium text-purple-200/80 mb-1.5">
-              Κωδικός
+              Password
             </label>
             <input
               type="password"
@@ -87,7 +87,7 @@ export default function HostLoginPage() {
             className="w-full mt-2 rounded-xl py-3.5 px-4 font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 hover:opacity-95 transition disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
           >
             <Lock className="w-4 h-4" />
-            {loading ? "Σύνδεση..." : "Είσοδος Host"}
+            {loading ? "Signing in..." : "Host Sign In"}
           </button>
         </form>
       </div>

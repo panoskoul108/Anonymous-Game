@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Plus, Tv, Users, LogOut } from "lucide-react";
+import { Plus, Tv, Users, LogOut, Trash2 } from "lucide-react";
 
 function generatePin(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -16,6 +16,17 @@ export default function HostHomePage() {
   const [rooms, setRooms] = useState<any[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const loadRooms = async (uid: string) => {
+    const { data: myRooms } = await supabase
+      .from("rooms")
+      .select("*")
+      .eq("host_id", uid)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    if (myRooms) setRooms(myRooms);
+  };
+
   useEffect(() => {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -24,15 +35,7 @@ export default function HostHomePage() {
         return;
       }
       setUserId(user.id);
-
-      const { data: myRooms } = await supabase
-        .from("rooms")
-        .select("*")
-        .eq("host_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(10);
-
-      if (myRooms) setRooms(myRooms);
+      await loadRooms(user.id);
     };
     init();
   }, [router]);
@@ -55,12 +58,11 @@ export default function HostHomePage() {
       .single();
 
     if (roomError || !newRoom) {
-      setErrorMsg(roomError?.message || "Αποτυχία δημιουργίας δωματίου");
+      setErrorMsg(roomError?.message || "Failed to create room");
       setCreating(false);
       return;
     }
 
-    // Αντιγραφή των 18 global ερωτήσεων (room_id IS NULL) στο νέο δωμάτιο
     const { data: globalQuestions } = await supabase
       .from("questions")
       .select("category, text")
@@ -78,6 +80,12 @@ export default function HostHomePage() {
 
     setCreating(false);
     router.push(`/host/${newRoom.pin}`);
+  };
+
+  const handleDeleteRoom = async (roomId: string) => {
+    if (!userId) return;
+    await supabase.from("rooms").delete().eq("id", roomId);
+    await loadRooms(userId);
   };
 
   const handleSignOut = async () => {
@@ -101,15 +109,15 @@ export default function HostHomePage() {
           className="flex items-center gap-2 rounded-xl bg-[#130b29] border border-purple-500/30 px-4 py-2 text-xs text-purple-200 hover:border-rose-400/50 cursor-pointer"
         >
           <LogOut className="w-4 h-4" />
-          Αποσύνδεση
+          Sign Out
         </button>
       </div>
 
       <div className="rounded-3xl bg-[#130b29] border border-fuchsia-500/30 p-7 mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-bold text-white">Νέο Δωμάτιο Cabin Trip</h2>
+          <h2 className="text-xl font-bold text-white">New Cabin Trip Room</h2>
           <p className="text-sm text-purple-200/70 mt-1">
-            Δημιουργεί μοναδικό PIN, QR link και φορτώνει τις 18 έτοιμες ερωτήσεις.
+            Generates a unique PIN, QR code link, and loads the 18 starter questions.
           </p>
         </div>
         <button
@@ -118,7 +126,7 @@ export default function HostHomePage() {
           className="rounded-2xl px-6 py-4 font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 hover:opacity-95 transition disabled:opacity-50 flex items-center gap-2 shrink-0 cursor-pointer"
         >
           <Plus className="w-5 h-5" />
-          {creating ? "Δημιουργία..." : "Δημιουργία Δωματίου"}
+          {creating ? "Creating..." : "Create Room"}
         </button>
       </div>
 
@@ -129,12 +137,12 @@ export default function HostHomePage() {
       )}
 
       <h3 className="text-sm font-semibold uppercase tracking-wider text-purple-300/70 mb-3">
-        Πρόσφατα Δωμάτια
+        Recent Rooms
       </h3>
       <div className="grid gap-3">
         {rooms.length === 0 ? (
           <div className="rounded-2xl bg-[#130b29]/60 border border-purple-500/20 p-6 text-sm text-purple-300/60">
-            Δεν έχεις δημιουργήσει ακόμα κάποιο δωμάτιο.
+            No rooms created yet.
           </div>
         ) : (
           rooms.map((r) => (
@@ -164,6 +172,13 @@ export default function HostHomePage() {
                 >
                   <Tv className="w-4 h-4" />
                   Big Screen
+                </button>
+                <button
+                  onClick={() => handleDeleteRoom(r.id)}
+                  className="rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/30 p-2 text-rose-300 cursor-pointer"
+                  title="Delete Room"
+                >
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </div>
             </div>

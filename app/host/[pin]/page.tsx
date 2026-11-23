@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { QRCodeSVG } from "qrcode.react";
 import {
   Play,
   Eye,
@@ -17,6 +18,14 @@ import {
   Tv,
   Sparkles,
   UserCheck,
+  Copy,
+  Check,
+  QrCode,
+  Shuffle,
+  ChevronRight,
+  Pencil,
+  RotateCcw,
+  X,
 } from "lucide-react";
 
 type TabType = "round" | "library" | "suggestions" | "players";
@@ -35,16 +44,30 @@ export default function HostDashboardPage() {
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [answers, setAnswers] = useState<any[]>([]);
 
+  // Quick utility states
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [joinUrl, setJoinUrl] = useState("");
+
   // Round setup state
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>("");
   const [targetMode, setTargetMode] = useState<"all" | "selected">("all");
   const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
+  const [playerSearch, setPlayerSearch] = useState("");
   const [showAnswersOnScreen, setShowAnswersOnScreen] = useState<boolean>(false);
 
-  // Library & new question state
+  // Library & question editing
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [newQuestionText, setNewQuestionText] = useState("");
   const [newQuestionCategory, setNewQuestionCategory] = useState<"flirting" | "spicy" | "funny">("funny");
+  const [editingQuestionId, setEditingQuestionId] = useState<string | null>(null);
+  const [editingQuestionText, setEditingQuestionText] = useState("");
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && pin) {
+      setJoinUrl(`${window.location.origin}/play/${pin}`);
+    }
+  }, [pin]);
 
   const playerMap = useMemo(() => {
     const map: Record<string, any> = {};
@@ -57,10 +80,14 @@ export default function HostDashboardPage() {
     return questions.find((q) => q.id === currentRound.question_id) || null;
   }, [currentRound, questions]);
 
-  const activeAnswer = useMemo(() => {
-    if (!currentRound?.active_answer_id) return answers[0] || null;
-    return answers.find((a) => a.id === currentRound.active_answer_id) || answers[0] || null;
+  const activeAnswerIndex = useMemo(() => {
+    if (answers.length === 0) return -1;
+    if (!currentRound?.active_answer_id) return 0;
+    const idx = answers.findIndex((a) => a.id === currentRound.active_answer_id);
+    return idx >= 0 ? idx : 0;
   }, [currentRound, answers]);
+
+  const activeAnswer = activeAnswerIndex >= 0 ? answers[activeAnswerIndex] : null;
 
   const loadAnswersForRound = useCallback(async (roundId: string | null) => {
     if (!roundId) {
@@ -88,17 +115,13 @@ export default function HostDashboardPage() {
       .eq("pin", pin)
       .single();
 
-    if (error || !roomData) {
-      router.replace("/host");
-      return;
-    }
-
-    if (roomData.host_id !== user.id) {
+    if (error || !roomData || roomData.host_id !== user.id) {
       router.replace("/host");
       return;
     }
 
     setRoom(roomData);
+    setShowAnswersOnScreen(roomData.status === "discussing" || roomData.status === "revealed");
 
     const [playersRes, questionsRes, suggestionsRes] = await Promise.all([
       supabase.from("players").select("*").eq("room_id", roomData.id).order("created_at", { ascending: true }),
@@ -135,7 +158,6 @@ export default function HostDashboardPage() {
     loadRoomData();
   }, [loadRoomData]);
 
-  // Realtime subscriptions για παίκτες, απαντήσεις, προτάσεις και γύρους
   useEffect(() => {
     if (!room?.id) return;
 
@@ -172,10 +194,31 @@ export default function HostDashboardPage() {
     supabase.removeChannel(ch);
   };
 
+  const handleCopyJoinLink = async () => {
+    if (!joinUrl) return;
+    await navigator.clipboard.writeText(joinUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 1800);
+  };
+
+  const handlePickRandomUnusedQuestion = () => {
+    const unused = questions.filter((q) => !q.is_used && q.id !== selectedQuestionId);
+    const pool = unused.length > 0 ? unused : questions.filter((q) => q.id !== selectedQuestionId);
+    if (pool.length === 0) return;
+    const randomQ = pool[Math.floor(Math.random() * pool.length)];
+    setSelectedQuestionId(randomQ.id);
+  };
+
+  const handlePickRandomPlayers = (count: number) => {
+    if (players.length === 0) return;
+    const shuffled = [...players].sort(() => Math.random() - 0.5);
+    setSelectedPlayerIds(shuffled.slice(0, Math.min(count, players.length)).map((p) => p.id));
+  };
+
   const handleStartRound = async () => {
     if (!room || !selectedQuestionId) return;
     if (targetMode === "selected" && selectedPlayerIds.length === 0) {
-      alert("Επίλεξε τουλάχιστον έναν παίκτη ή διάλεξε 'Όλοι'.");
+      alert("Select at least one player or switch to 'Everyone'.");
       return;
     }
 
@@ -204,6 +247,10 @@ export default function HostDashboardPage() {
       .from("questions")
       .update({ is_used: true })
       .eq("id", selectedQuestionId);
+
+    // Auto-select next unused question for convenience
+    const nextUnused = questions.find((q) => !q.is_used && q.id !== selectedQuestionId);
+    if (nextUnused) setSelectedQuestionId(nextUnused.id);
 
     setShowAnswersOnScreen(false);
     await broadcastEvent("round_started", { roundId: newRound.id });
@@ -243,7 +290,12 @@ export default function HostDashboardPage() {
     await loadRoomData();
   };
 
-  // Φυσικό παιχνίδι 50-50: Correct -> Reveal Name, Wrong -> Keep Anonymous
+  const handleNextAnswer = async () => {
+    if (answers.length === 0) return;
+    const nextIdx = (activeAnswerIndex + 1) % answers.length;
+    await handleSelectActiveAnswer(answers[nextIdx].id);
+  };
+
   const handle5050Result = async (answerId: string, isCorrect: boolean) => {
     const nextStatus = isCorrect ? "revealed_correct" : "kept_anonymous";
     await supabase
@@ -283,6 +335,25 @@ export default function HostDashboardPage() {
       is_used: false,
     });
     setNewQuestionText("");
+    await loadRoomData();
+  };
+
+  const handleSaveEditedQuestion = async (id: string) => {
+    if (!editingQuestionText.trim()) return;
+    await supabase
+      .from("questions")
+      .update({ text: editingQuestionText.trim() })
+      .eq("id", id);
+    setEditingQuestionId(null);
+    setEditingQuestionText("");
+    await loadRoomData();
+  };
+
+  const handleToggleQuestionUsed = async (q: any) => {
+    await supabase
+      .from("questions")
+      .update({ is_used: !q.is_used })
+      .eq("id", q.id);
     await loadRoomData();
   };
 
@@ -326,10 +397,16 @@ export default function HostDashboardPage() {
       : players.length;
   }, [currentRound, players.length]);
 
+  const filteredPlayers = useMemo(() => {
+    if (!playerSearch.trim()) return players;
+    const q = playerSearch.toLowerCase();
+    return players.filter((p) => p.nickname.toLowerCase().includes(q));
+  }, [players, playerSearch]);
+
   const pendingSuggestionsCount = suggestions.filter((s) => s.status === "pending").length;
 
   if (loading) {
-    return <div className="min-h-screen flex items-center justify-center text-cyan-300">Φόρτωση Host Dashboard...</div>;
+    return <div className="min-h-screen flex items-center justify-center text-cyan-300">Loading Host Dashboard...</div>;
   }
 
   return (
@@ -350,17 +427,31 @@ export default function HostDashboardPage() {
           </span>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <span className="text-xs text-purple-200/80 bg-[#130b29] border border-purple-500/25 px-3 py-2 rounded-xl">
-            Παίκτες: <strong>{players.length}</strong>
-          </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleCopyJoinLink}
+            className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3 py-2 text-xs font-semibold text-purple-200 flex items-center gap-1.5 cursor-pointer"
+          >
+            {copiedLink ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5" />}
+            {copiedLink ? "Copied!" : "Copy Invite Link"}
+          </button>
+
+          <button
+            onClick={() => setShowQrModal(true)}
+            className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3 py-2 text-xs font-semibold text-purple-200 flex items-center gap-1.5 cursor-pointer"
+          >
+            <QrCode className="w-3.5 h-3.5 text-pink-400" />
+            QR
+          </button>
+
           <button
             onClick={() => window.open(`/screen/${room?.pin}`, "_blank")}
-            className="rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 px-4 py-2 text-xs font-bold text-cyan-200 flex items-center gap-2 cursor-pointer"
+            className="rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 px-3.5 py-2 text-xs font-bold text-cyan-200 flex items-center gap-1.5 cursor-pointer"
           >
             <Tv className="w-4 h-4" />
-            Άνοιγμα Big Screen
+            Open Big Screen
           </button>
+
           <button
             onClick={handleReturnToLobby}
             className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3.5 py-2 text-xs font-semibold text-purple-200 cursor-pointer"
@@ -393,7 +484,7 @@ export default function HostDashboardPage() {
           }`}
         >
           <BookOpen className="w-4 h-4" />
-          Library ({questions.length})
+          Library ({questions.filter((q) => !q.is_used).length} left)
         </button>
 
         <button
@@ -426,11 +517,22 @@ export default function HostDashboardPage() {
         <div className="grid lg:grid-cols-12 gap-6">
           {/* Left Column: Setup New Round */}
           <div className="lg:col-span-5 rounded-3xl bg-[#130b29] border border-fuchsia-500/30 p-6 space-y-5">
-            <h2 className="text-lg font-bold text-white">Νέος Γύρος</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Start New Round</h2>
+              <button
+                type="button"
+                onClick={handlePickRandomUnusedQuestion}
+                className="rounded-xl bg-purple-900/60 hover:bg-purple-800/70 border border-purple-400/30 px-3 py-1.5 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer"
+                title="Pick Random Unused Question"
+              >
+                <Shuffle className="w-3.5 h-3.5" />
+                Random Q
+              </button>
+            </div>
 
             <div>
               <label className="block text-xs font-semibold text-purple-200/80 mb-2">
-                Επιλογή Ερώτησης
+                Select Question
               </label>
               <select
                 value={selectedQuestionId}
@@ -439,7 +541,7 @@ export default function HostDashboardPage() {
               >
                 {questions.map((q) => (
                   <option key={q.id} value={q.id}>
-                    {q.is_used ? "[USED] " : ""}[{q.category.toUpperCase()}] {q.text}
+                    {q.is_used ? "✓ " : "• "}[{q.category.toUpperCase()}] {q.text}
                   </option>
                 ))}
               </select>
@@ -447,7 +549,7 @@ export default function HostDashboardPage() {
 
             <div>
               <label className="block text-xs font-semibold text-purple-200/80 mb-2">
-                Ποιοι απαντούν;
+                Who Answers?
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <button
@@ -459,7 +561,7 @@ export default function HostDashboardPage() {
                       : "bg-[#090514] border-purple-500/25 text-purple-300"
                   }`}
                 >
-                  Όλοι ({players.length})
+                  Everyone ({players.length})
                 </button>
                 <button
                   type="button"
@@ -470,47 +572,81 @@ export default function HostDashboardPage() {
                       : "bg-[#090514] border-purple-500/25 text-purple-300"
                   }`}
                 >
-                  Επιλεγμένοι ({selectedPlayerIds.length})
+                  Selected ({selectedPlayerIds.length})
                 </button>
               </div>
             </div>
 
             {targetMode === "selected" && (
-              <div className="max-h-48 overflow-y-auto rounded-2xl bg-[#090514] border border-purple-500/25 p-3 space-y-1.5">
-                {players.map((p) => {
-                  const checked = selectedPlayerIds.includes(p.id);
-                  return (
-                    <label
-                      key={p.id}
-                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-purple-950/50 cursor-pointer text-sm"
-                    >
-                      <span className="flex items-center gap-2">
-                        <span>{p.avatar}</span>
-                        <span>{p.nickname}</span>
-                      </span>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            setSelectedPlayerIds((prev) => [...prev, p.id]);
-                          } else {
-                            setSelectedPlayerIds((prev) => prev.filter((id) => id !== p.id));
-                          }
-                        }}
-                      />
-                    </label>
-                  );
-                })}
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handlePickRandomPlayers(5)}
+                    className="rounded-lg bg-fuchsia-500/20 border border-fuchsia-400/30 px-2.5 py-1 text-[11px] font-bold text-fuchsia-200 cursor-pointer"
+                  >
+                    🎲 Random 5
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPlayerIds(players.map((p) => p.id))}
+                    className="rounded-lg bg-purple-900/50 border border-purple-500/30 px-2.5 py-1 text-[11px] font-semibold text-purple-200 cursor-pointer"
+                  >
+                    Select All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPlayerIds([])}
+                    className="rounded-lg bg-purple-900/50 border border-purple-500/30 px-2.5 py-1 text-[11px] font-semibold text-purple-300 cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  value={playerSearch}
+                  onChange={(e) => setPlayerSearch(e.target.value)}
+                  placeholder="Filter players..."
+                  className="w-full rounded-xl bg-[#090514] border border-purple-500/25 px-3 py-2 text-xs text-white"
+                />
+
+                <div className="max-h-48 overflow-y-auto rounded-2xl bg-[#090514] border border-purple-500/25 p-2.5 space-y-1">
+                  {filteredPlayers.map((p) => {
+                    const checked = selectedPlayerIds.includes(p.id);
+                    return (
+                      <label
+                        key={p.id}
+                        className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-purple-950/50 cursor-pointer text-sm"
+                      >
+                        <span className="flex items-center gap-2">
+                          <span>{p.avatar}</span>
+                          <span>{p.nickname}</span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedPlayerIds((prev) => [...prev, p.id]);
+                            } else {
+                              setSelectedPlayerIds((prev) => prev.filter((id) => id !== p.id));
+                            }
+                          }}
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
             <button
               onClick={handleStartRound}
-              className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 hover:opacity-95 flex items-center justify-center gap-2 cursor-pointer"
+              className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 hover:opacity-95 flex items-center justify-center gap-2 cursor-pointer shadow-lg"
             >
               <Play className="w-4 h-4 fill-current" />
-              Έναρξη Γύρου
+              Launch Round
             </button>
           </div>
 
@@ -518,43 +654,57 @@ export default function HostDashboardPage() {
           <div className="lg:col-span-7 rounded-3xl bg-[#130b29] border border-purple-500/30 p-6 space-y-5">
             {!currentRound ? (
               <div className="py-16 text-center text-purple-300/60 text-sm">
-                Δεν υπάρχει ενεργός γύρος. Επίλεξε ερώτηση και πάτησε «Έναρξη Γύρου».
+                No active round. Pick a question on the left and press &ldquo;Launch Round&rdquo;.
               </div>
             ) : (
               <>
                 <div className="flex flex-wrap items-start justify-between gap-3 border-b border-purple-500/20 pb-4">
-                  <div>
+                  <div className="flex-1">
                     <span className="text-xs uppercase font-bold text-cyan-300">
-                      Τρέχουσα Ερώτηση
+                      Current Question
                     </span>
                     <h3 className="text-xl font-bold text-white mt-1">
                       {currentQuestion?.text}
                     </h3>
                   </div>
                   <div className="text-right shrink-0">
-                    <span className="text-xs text-purple-300/70 block">Απαντήσεις</span>
+                    <span className="text-xs text-purple-300/70 block">Submitted</span>
                     <span className="text-2xl font-black text-lime-400">
                       {answers.length} / {expectedRespondersCount}
                     </span>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap gap-2">
-                  {!showAnswersOnScreen ? (
+                {/* Quick Action Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    {!showAnswersOnScreen ? (
+                      <button
+                        onClick={() => handleToggleAnswersVisibility(true)}
+                        disabled={answers.length === 0}
+                        className="rounded-xl bg-cyan-400 text-slate-950 font-bold text-xs px-4 py-2.5 flex items-center gap-2 disabled:opacity-40 cursor-pointer"
+                      >
+                        <Eye className="w-4 h-4" />
+                        Reveal Answers on Big Screen
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleToggleAnswersVisibility(false)}
+                        className="rounded-xl bg-purple-900/60 border border-purple-400/30 text-purple-100 font-bold text-xs px-4 py-2.5 flex items-center gap-2 cursor-pointer"
+                      >
+                        <EyeOff className="w-4 h-4" />
+                        Hide Answers
+                      </button>
+                    )}
+                  </div>
+
+                  {showAnswersOnScreen && answers.length > 1 && (
                     <button
-                      onClick={() => handleToggleAnswersVisibility(true)}
-                      className="rounded-xl bg-cyan-400 text-slate-950 font-bold text-xs px-4 py-2.5 flex items-center gap-2 cursor-pointer"
+                      onClick={handleNextAnswer}
+                      className="rounded-xl bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-400/40 text-fuchsia-200 font-bold text-xs px-4 py-2.5 flex items-center gap-1.5 cursor-pointer"
                     >
-                      <Eye className="w-4 h-4" />
-                      Εμφάνιση Απαντήσεων στο Big Screen
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => handleToggleAnswersVisibility(false)}
-                      className="rounded-xl bg-purple-900/60 border border-purple-400/30 text-purple-100 font-bold text-xs px-4 py-2.5 flex items-center gap-2 cursor-pointer"
-                    >
-                      <EyeOff className="w-4 h-4" />
-                      Απόκρυψη Απαντήσεων
+                      Next Answer ({activeAnswerIndex + 1}/{answers.length})
+                      <ChevronRight className="w-4 h-4" />
                     </button>
                   )}
                 </div>
@@ -563,7 +713,7 @@ export default function HostDashboardPage() {
                 <div className="space-y-3">
                   {answers.length === 0 ? (
                     <div className="rounded-2xl bg-[#090514]/70 border border-purple-500/20 p-6 text-center text-sm text-purple-300/60">
-                      Αναμονή για απαντήσεις από τα κινητά...
+                      Waiting for players to submit answers from their phones...
                     </div>
                   ) : (
                     answers.map((ans, idx) => {
@@ -582,20 +732,20 @@ export default function HostDashboardPage() {
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                             <span className="text-xs font-bold uppercase text-purple-300/70">
-                              Απάντηση #{idx + 1} {isSelectedCard && "• (Στο Big Screen)"}
+                              Answer #{idx + 1} {isSelectedCard && "• (On Big Screen)"}
                             </span>
                             <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30">
-                              Συντάκτης (Host only): {author?.avatar} {author?.nickname || "Άγνωστος"}
+                              Author (Host Only): {author?.avatar} {author?.nickname || "Unknown"}
                             </span>
                           </div>
 
                           <p className="text-base font-medium text-white mb-3">
-                            «{ans.content}»
+                            &ldquo;{ans.content}&rdquo;
                           </p>
 
                           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-purple-500/15">
                             <span className="text-xs text-purple-300/70">
-                              50-50 Μπαλάκι:{" "}
+                              50-50 Ball:{" "}
                               <strong className={ans.reveal_status === "revealed_correct" ? "text-lime-400" : "text-amber-300"}>
                                 {ans.reveal_status === "revealed_correct"
                                   ? "REVEALED (Correct)"
@@ -650,7 +800,7 @@ export default function HostDashboardPage() {
               type="text"
               value={newQuestionText}
               onChange={(e) => setNewQuestionText(e.target.value)}
-              placeholder="Γράψε νέα ερώτηση για το δωμάτιο..."
+              placeholder="Write a new question for this room..."
               className="flex-1 rounded-xl bg-[#090514] border border-purple-500/30 px-4 py-3 text-sm text-white"
             />
             <button
@@ -658,7 +808,7 @@ export default function HostDashboardPage() {
               className="rounded-xl bg-gradient-to-r from-pink-500 to-cyan-400 text-slate-950 font-bold text-sm px-5 py-3 flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              Προσθήκη
+              Add Question
             </button>
           </form>
 
@@ -684,9 +834,9 @@ export default function HostDashboardPage() {
               .map((q) => (
                 <div
                   key={q.id}
-                  className="rounded-2xl bg-[#090514]/80 border border-purple-500/20 p-4 flex items-center justify-between gap-4"
+                  className="rounded-2xl bg-[#090514]/80 border border-purple-500/20 p-4 flex flex-wrap items-center justify-between gap-4"
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-1 flex-1 min-w-[220px]">
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-purple-900/70 text-cyan-300">
                         {q.category}
@@ -697,8 +847,33 @@ export default function HostDashboardPage() {
                         </span>
                       )}
                     </div>
-                    <p className="text-sm text-white">{q.text}</p>
+
+                    {editingQuestionId === q.id ? (
+                      <div className="flex gap-2 pt-1">
+                        <input
+                          type="text"
+                          value={editingQuestionText}
+                          onChange={(e) => setEditingQuestionText(e.target.value)}
+                          className="flex-1 rounded-lg bg-[#130b29] border border-cyan-400 px-3 py-1.5 text-sm text-white"
+                        />
+                        <button
+                          onClick={() => handleSaveEditedQuestion(q.id)}
+                          className="rounded-lg bg-lime-400 text-slate-950 px-3 py-1.5 text-xs font-bold cursor-pointer"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingQuestionId(null)}
+                          className="rounded-lg bg-purple-900/60 text-purple-200 px-2.5 py-1.5 text-xs cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-white">{q.text}</p>
+                    )}
                   </div>
+
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={() => {
@@ -707,11 +882,29 @@ export default function HostDashboardPage() {
                       }}
                       className="rounded-lg bg-cyan-500/15 border border-cyan-400/30 px-3 py-1.5 text-xs font-semibold text-cyan-200 cursor-pointer"
                     >
-                      Επιλογή
+                      Use Now
+                    </button>
+                    <button
+                      onClick={() => handleToggleQuestionUsed(q)}
+                      className="rounded-lg bg-purple-900/50 border border-purple-500/30 p-2 text-purple-200 cursor-pointer"
+                      title={q.is_used ? "Mark as Unused" : "Mark as Used"}
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditingQuestionId(q.id);
+                        setEditingQuestionText(q.text);
+                      }}
+                      className="rounded-lg bg-purple-900/50 border border-purple-500/30 p-2 text-purple-200 cursor-pointer"
+                      title="Edit"
+                    >
+                      <Pencil className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleDeleteQuestion(q.id)}
                       className="rounded-lg bg-rose-500/15 border border-rose-400/30 p-2 text-rose-300 cursor-pointer"
+                      title="Delete"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -725,9 +918,9 @@ export default function HostDashboardPage() {
       {/* TAB 3: SUGGESTIONS */}
       {activeTab === "suggestions" && (
         <div className="rounded-3xl bg-[#130b29] border border-purple-500/30 p-6 space-y-4">
-          <h2 className="text-lg font-bold text-white">Ανώνυμες Προτάσεις Παικτών</h2>
+          <h2 className="text-lg font-bold text-white">Anonymous Player Suggestions</h2>
           {suggestions.length === 0 ? (
-            <p className="text-sm text-purple-300/60">Δεν υπάρχουν προτάσεις ερωτήσεων ακόμα.</p>
+            <p className="text-sm text-purple-300/60">No player suggestions submitted yet.</p>
           ) : (
             suggestions.map((s) => (
               <div
@@ -750,13 +943,13 @@ export default function HostDashboardPage() {
                       className="rounded-xl bg-lime-400/20 border border-lime-400/50 text-lime-300 px-3.5 py-2 text-xs font-bold flex items-center gap-1 cursor-pointer"
                     >
                       <UserCheck className="w-4 h-4" />
-                      Έγκριση στη Βιβλιοθήκη
+                      Approve to Library
                     </button>
                     <button
                       onClick={() => handleRejectSuggestion(s.id)}
                       className="rounded-xl bg-rose-500/20 border border-rose-400/50 text-rose-300 px-3.5 py-2 text-xs font-bold cursor-pointer"
                     >
-                      Απόρριψη
+                      Reject
                     </button>
                   </div>
                 )}
@@ -769,7 +962,7 @@ export default function HostDashboardPage() {
       {/* TAB 4: PLAYERS */}
       {activeTab === "players" && (
         <div className="rounded-3xl bg-[#130b29] border border-purple-500/30 p-6">
-          <h2 className="text-lg font-bold text-white mb-4">Συμμετέχοντες ({players.length})</h2>
+          <h2 className="text-lg font-bold text-white mb-4">Connected Players ({players.length})</h2>
           <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
             {players.map((p) => {
               const hasAnswered = answers.some((a) => a.player_id === p.id);
@@ -785,22 +978,46 @@ export default function HostDashboardPage() {
                       <div className="text-[11px] text-purple-300/70">
                         {currentRound
                           ? hasAnswered
-                            ? "✅ Απάντησε"
-                            : "⏳ Περιμένει"
-                          : "Συνδεδεμένος"}
+                            ? "✅ Answered"
+                            : "⏳ Waiting"
+                          : "Ready"}
                       </div>
                     </div>
                   </div>
                   <button
                     onClick={() => handleRemovePlayer(p.id)}
                     className="text-rose-400/70 hover:text-rose-300 p-1.5 cursor-pointer"
-                    title="Απομάκρυνση"
+                    title="Kick Player"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {showQrModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-[#130b29] border border-fuchsia-500/40 p-6 text-center space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-widest text-cyan-300">
+                Scan to Join
+              </span>
+              <button
+                onClick={() => setShowQrModal(false)}
+                className="text-purple-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="bg-white p-4 rounded-2xl inline-block">
+              {joinUrl && <QRCodeSVG value={joinUrl} size={210} />}
+            </div>
+            <div className="text-3xl font-black tracking-[0.25em] text-cyan-300">{pin}</div>
+            <p className="text-xs text-purple-200/70 break-all">{joinUrl}</p>
           </div>
         </div>
       )}
