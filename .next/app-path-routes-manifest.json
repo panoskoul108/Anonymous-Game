@@ -1,0 +1,11 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/host/[pin]/page": "/host/[pin]",
+  "/host/login/page": "/host/login",
+  "/host/page": "/host",
+  "/page": "/",
+  "/play/[pin]/page": "/play/[pin]",
+  "/play/page": "/play",
+  "/screen/[pin]/page": "/screen/[pin]"
+}

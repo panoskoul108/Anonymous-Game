@@ -1,0 +1,11 @@
+{
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/host/[pin]/page": "app/host/[pin]/page.js",
+  "/host/login/page": "app/host/login/page.js",
+  "/host/page": "app/host/page.js",
+  "/page": "app/page.js",
+  "/play/[pin]/page": "app/play/[pin]/page.js",
+  "/play/page": "app/play/page.js",
+  "/screen/[pin]/page": "app/screen/[pin]/page.js"
+}

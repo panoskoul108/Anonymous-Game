@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+:root {
+  --bg-main: #090514;
+  --bg-card: #130b29;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: #ffffff;
+  overflow-x: hidden;
+}
