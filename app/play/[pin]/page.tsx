@@ -1,11 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X, EyeOff } from "lucide-react";
+import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X, EyeOff, Lock } from "lucide-react";
 
-const AVATARS = ["🦊", "🐺", "🦁", "🐼", "🦄", "🐙", "🔥", "⚡", "🎭", "🍸", "🪩", "👾"];
+const AVATARS = [
+  "🦊", "🐺", "🦁", "🐼", "🦄", "🐙",
+  "🔥", "⚡", "🎭", "🍸", "🪩", "👾",
+  "🐯", "🐸", "🦋", "🐍", "🦈", "🦩",
+  "🍕", "🌶️", "🍾", "🎲", "👑", "🚀",
+  "👽", "🤖", "👻", "💎", "🌙", "🍄",
+];
 const REACTIONS = ["😂", "👀", "🤯", "❤️", "🔥"];
 
 export default function PlayerRoomPage() {
@@ -18,6 +24,7 @@ export default function PlayerRoomPage() {
   const [question, setQuestion] = useState<any>(null);
   const [players, setPlayers] = useState<any[]>([]);
   const [answers, setAnswers] = useState<any[]>([]);
+  const [isRoomLocked, setIsRoomLocked] = useState(false);
 
   // Join form
   const [nickname, setNickname] = useState("");
@@ -35,6 +42,10 @@ export default function PlayerRoomPage() {
   const [suggestCategory, setSuggestCategory] = useState<"flirting" | "spicy" | "funny">("funny");
   const [suggestText, setSuggestText] = useState("");
   const [suggestSent, setSuggestSent] = useState(false);
+
+  // Persistent broadcast channel for instant reactions & sync
+  const gameChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const [channelReady, setChannelReady] = useState(false);
 
   const storageKey = useMemo(() => `anon_reveal_player_${pin}`, [pin]);
 
@@ -79,7 +90,18 @@ export default function PlayerRoomPage() {
 
       if (currentPlayer?.id && roundData?.id) {
         const localFlag = localStorage.getItem(`answered_round_${roundData.id}_${currentPlayer.id}`);
-        setHasSubmittedCurrentRound(Boolean(localFlag));
+        if (localFlag) {
+          setHasSubmittedCurrentRound(true);
+        } else {
+          const { data: dbAnswered } = await supabase.rpc("has_player_answered", {
+            p_round_id: roundData.id,
+            p_player_id: currentPlayer.id,
+          });
+          if (dbAnswered) {
+            localStorage.setItem(`answered_round_${roundData.id}_${currentPlayer.id}`, "1");
+          }
+          setHasSubmittedCurrentRound(Boolean(dbAnswered));
+        }
       } else {
         setHasSubmittedCurrentRound(false);
       }
@@ -135,6 +157,40 @@ export default function PlayerRoomPage() {
     initRoomAndSession();
   }, [initRoomAndSession]);
 
+  // Persistent broadcast channel per room PIN
+  useEffect(() => {
+    if (!pin) return;
+
+    const ch = supabase.channel(`game:${pin}`, {
+      config: { broadcast: { self: false } },
+    });
+
+    ch.on("broadcast", { event: "room_lock_changed" }, (msg: any) => {
+      setIsRoomLocked(Boolean(msg?.payload?.locked));
+    });
+
+    ch.on("broadcast", { event: "*" }, async () => {
+      if (!room?.id) return;
+      const { data: freshRoom } = await supabase.from("rooms").select("*").eq("id", room.id).single();
+      if (freshRoom) {
+        setRoom(freshRoom);
+        await loadGameState(freshRoom, player);
+      }
+    });
+
+    ch.subscribe((status) => {
+      setChannelReady(status === "SUBSCRIBED");
+    });
+
+    gameChannelRef.current = ch;
+
+    return () => {
+      setChannelReady(false);
+      supabase.removeChannel(ch);
+      gameChannelRef.current = null;
+    };
+  }, [pin, room?.id, player, loadGameState]);
+
   useEffect(() => {
     if (!room?.id) return;
 
@@ -157,26 +213,14 @@ export default function PlayerRoomPage() {
       })
       .subscribe();
 
-    const broadcastChannel = supabase
-      .channel(`game:${pin}`)
-      .on("broadcast", { event: "*" }, async () => {
-        const { data: freshRoom } = await supabase.from("rooms").select("*").eq("id", room.id).single();
-        if (freshRoom) {
-          setRoom(freshRoom);
-          await loadGameState(freshRoom, player);
-        }
-      })
-      .subscribe();
-
     return () => {
       supabase.removeChannel(dbChannel);
-      supabase.removeChannel(broadcastChannel);
     };
-  }, [room?.id, pin, player, loadGameState]);
+  }, [room?.id, player, loadGameState]);
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!room || !nickname.trim()) return;
+    if (!room || !nickname.trim() || isRoomLocked) return;
     setJoining(true);
     setErrorMsg(null);
 
@@ -236,6 +280,11 @@ export default function PlayerRoomPage() {
     setSubmittingAnswer(false);
 
     if (error) {
+      if (error.message.includes("Already answered")) {
+        localStorage.setItem(`answered_round_${round.id}_${player.id}`, "1");
+        setHasSubmittedCurrentRound(true);
+        return;
+      }
       setErrorMsg(error.message);
       return;
     }
@@ -247,14 +296,26 @@ export default function PlayerRoomPage() {
 
   const handleSendReaction = async (emoji: string) => {
     if (!pin) return;
-    const ch = supabase.channel(`game:${pin}`);
-    await ch.subscribe();
-    await ch.send({
-      type: "broadcast",
-      event: "live_reaction",
-      payload: { emoji },
-    });
-    supabase.removeChannel(ch);
+    if (gameChannelRef.current && channelReady) {
+      await gameChannelRef.current.send({
+        type: "broadcast",
+        event: "live_reaction",
+        payload: { emoji, ts: Date.now() },
+      });
+    } else {
+      const tempCh = supabase.channel(`game:${pin}`);
+      await new Promise<void>((resolve) => {
+        tempCh.subscribe((status) => {
+          if (status === "SUBSCRIBED") resolve();
+        });
+      });
+      await tempCh.send({
+        type: "broadcast",
+        event: "live_reaction",
+        payload: { emoji, ts: Date.now() },
+      });
+      setTimeout(() => supabase.removeChannel(tempCh), 400);
+    }
   };
 
   const handleSuggestQuestion = async (e: React.FormEvent) => {
@@ -321,62 +382,72 @@ export default function PlayerRoomPage() {
 
         {/* Step 1: Join Room */}
         {room && !player && (
-          <form
-            onSubmit={handleJoin}
-            className="rounded-3xl bg-[#130b29] border border-fuchsia-500/35 p-6 space-y-5 shadow-2xl"
-          >
-            <div>
-              <h1 className="text-2xl font-black text-white">Join the Room</h1>
-              <p className="text-xs text-purple-200/75 mt-1">
-                Pick a nickname and avatar to play.
+          isRoomLocked ? (
+            <div className="rounded-3xl bg-[#130b29] border border-amber-400/40 p-7 text-center space-y-3">
+              <Lock className="w-8 h-8 text-amber-300 mx-auto" />
+              <h2 className="text-xl font-black text-white">Room is Currently Locked</h2>
+              <p className="text-xs text-purple-200/75">
+                Ask the host to unlock the room if you need to join late.
               </p>
             </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-purple-200/80 mb-1.5">
-                Nickname
-              </label>
-              <input
-                type="text"
-                maxLength={20}
-                required
-                value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
-                placeholder="Your name or nickname"
-                className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-400"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-purple-200/80 mb-2">
-                Avatar
-              </label>
-              <div className="grid grid-cols-6 gap-2">
-                {AVATARS.map((av) => (
-                  <button
-                    key={av}
-                    type="button"
-                    onClick={() => setAvatar(av)}
-                    className={`h-11 rounded-xl text-xl flex items-center justify-center border cursor-pointer transition ${
-                      avatar === av
-                        ? "bg-cyan-400/20 border-cyan-400 scale-105"
-                        : "bg-[#090514] border-purple-500/20"
-                    }`}
-                  >
-                    {av}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={joining}
-              className="w-full py-3.5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 cursor-pointer"
+          ) : (
+            <form
+              onSubmit={handleJoin}
+              className="rounded-3xl bg-[#130b29] border border-fuchsia-500/35 p-6 space-y-5 shadow-2xl"
             >
-              {joining ? "Joining..." : "Enter Game"}
-            </button>
-          </form>
+              <div>
+                <h1 className="text-2xl font-black text-white">Join the Room</h1>
+                <p className="text-xs text-purple-200/75 mt-1">
+                  Pick a nickname and avatar to play.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-purple-200/80 mb-1.5">
+                  Nickname
+                </label>
+                <input
+                  type="text"
+                  maxLength={20}
+                  required
+                  value={nickname}
+                  onChange={(e) => setNickname(e.target.value)}
+                  placeholder="Your name or nickname"
+                  className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-4 py-3 text-sm text-white focus:outline-none focus:border-cyan-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-purple-200/80 mb-2">
+                  Avatar
+                </label>
+                <div className="grid grid-cols-6 gap-2 max-h-44 overflow-y-auto p-1">
+                  {AVATARS.map((av) => (
+                    <button
+                      key={av}
+                      type="button"
+                      onClick={() => setAvatar(av)}
+                      className={`h-10 rounded-xl text-xl flex items-center justify-center border cursor-pointer transition ${
+                        avatar === av
+                          ? "bg-cyan-400/20 border-cyan-400 scale-105"
+                          : "bg-[#090514] border-purple-500/20"
+                      }`}
+                    >
+                      {av}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={joining}
+                className="w-full py-3.5 rounded-2xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 cursor-pointer"
+              >
+                {joining ? "Joining..." : "Enter Game"}
+              </button>
+            </form>
+          )
         )}
 
         {/* Step 2: Connected Player */}

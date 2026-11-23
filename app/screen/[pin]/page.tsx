@@ -1,17 +1,61 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
-import { Sparkles, EyeOff, CheckCircle2, Users } from "lucide-react";
+import { Sparkles, EyeOff, CheckCircle2, Users, Volume2, VolumeX } from "lucide-react";
 
 interface FloatingReaction {
   id: string;
   emoji: string;
   left: number;
+}
+
+function playGameSound(type: "pop" | "reveal_win" | "reveal_lose", muted: boolean) {
+  if (muted || typeof window === "undefined") return;
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (type === "pop") {
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(420, now);
+      osc.frequency.exponentialRampToValueAtTime(760, now + 0.14);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+      osc.start(now);
+      osc.stop(now + 0.16);
+    } else if (type === "reveal_win") {
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.setValueAtTime(659.25, now + 0.12);
+      osc.frequency.setValueAtTime(783.99, now + 0.24);
+      osc.frequency.setValueAtTime(1046.5, now + 0.36);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+      osc.start(now);
+      osc.stop(now + 0.65);
+    } else {
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(260, now);
+      osc.frequency.linearRampToValueAtTime(140, now + 0.42);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      osc.start(now);
+      osc.stop(now + 0.45);
+    }
+  } catch {
+    // ignore autoplay restriction before first click
+  }
 }
 
 export default function BigScreenPage() {
@@ -25,6 +69,10 @@ export default function BigScreenPage() {
   const [answers, setAnswers] = useState<any[]>([]);
   const [joinUrl, setJoinUrl] = useState<string>("");
   const [reactions, setReactions] = useState<FloatingReaction[]>([]);
+  const [currentGuesser, setCurrentGuesser] = useState<{ nickname: string; avatar: string } | null>(null);
+  const [muted, setMuted] = useState<boolean>(false);
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
 
   useEffect(() => {
     if (typeof window !== "undefined" && pin) {
@@ -82,6 +130,7 @@ export default function BigScreenPage() {
       setRound(null);
       setQuestion(null);
       setAnswers([]);
+      setCurrentGuesser(null);
     }
   }, [pin]);
 
@@ -109,15 +158,35 @@ export default function BigScreenPage() {
       .subscribe();
 
     const broadcastChannel = supabase
-      .channel(`game:${pin}`)
+      .channel(`game:${pin}`, { config: { broadcast: { self: true } } })
       .on("broadcast", { event: "reveal_result" }, (msg: any) => {
+        if (msg?.payload?.guesser !== undefined) {
+          setCurrentGuesser(msg.payload.guesser);
+        }
         if (msg?.payload?.isCorrect) {
+          playGameSound("reveal_win", mutedRef.current);
           confetti({
-            particleCount: 100,
-            spread: 80,
+            particleCount: 110,
+            spread: 85,
             origin: { y: 0.6 },
           });
+        } else {
+          playGameSound("reveal_lose", mutedRef.current);
         }
+        loadScreenData();
+      })
+      .on("broadcast", { event: "guesser_selected" }, (msg: any) => {
+        setCurrentGuesser(msg?.payload?.guesser || null);
+        playGameSound("pop", mutedRef.current);
+      })
+      .on("broadcast", { event: "active_answer_changed" }, (msg: any) => {
+        setCurrentGuesser(msg?.payload?.guesser || null);
+        playGameSound("pop", mutedRef.current);
+        loadScreenData();
+      })
+      .on("broadcast", { event: "answers_visibility" }, () => {
+        setCurrentGuesser(null);
+        playGameSound("pop", mutedRef.current);
         loadScreenData();
       })
       .on("broadcast", { event: "live_reaction" }, (msg: any) => {
@@ -186,11 +255,20 @@ export default function BigScreenPage() {
           </span>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setMuted((m) => !m)}
+            className="rounded-xl bg-[#130b29] border border-purple-500/30 p-2 text-purple-200 hover:text-white cursor-pointer"
+            title={muted ? "Unmute SFX" : "Mute SFX"}
+          >
+            {muted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-cyan-300" />}
+          </button>
+
           <div className="flex items-center gap-2 text-purple-200">
             <Users className="w-5 h-5 text-cyan-300" />
             <span className="text-lg font-bold">{players.length}</span>
           </div>
+
           <div className="rounded-2xl bg-[#130b29] border border-cyan-400/40 px-4 py-1.5">
             <span className="text-xs uppercase text-cyan-300/80 mr-2 font-semibold">PIN</span>
             <span className="text-2xl font-black tracking-widest text-white">{pin}</span>
@@ -214,7 +292,7 @@ export default function BigScreenPage() {
               <span className="text-pink-400 font-black">{pin}</span>.
             </p>
 
-            <div className="pt-3 flex flex-wrap gap-2.5">
+            <div className="pt-3 flex flex-wrap gap-2.5 max-h-64 overflow-y-auto">
               {players.map((p) => (
                 <div
                   key={p.id}
@@ -288,37 +366,47 @@ export default function BigScreenPage() {
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.96, y: -12 }}
                 transition={{ duration: 0.35 }}
-                className="rounded-3xl bg-[#130b29] border-2 border-fuchsia-500/40 p-8 md:p-12 text-center shadow-2xl"
+                className="rounded-3xl bg-[#130b29] border-2 border-fuchsia-500/40 p-8 md:p-12 text-center shadow-2xl space-y-6"
               >
-                <p className="text-3xl sm:text-5xl font-black text-white leading-snug mb-8">
+                {currentGuesser && (
+                  <div className="inline-flex items-center gap-2 rounded-full bg-cyan-500/15 border border-cyan-400/40 px-4 py-1.5 text-sm font-bold text-cyan-200">
+                    <span>🎯 50-50 Guesser:</span>
+                    <span>{currentGuesser.avatar}</span>
+                    <span className="text-white">{currentGuesser.nickname}</span>
+                  </div>
+                )}
+
+                <p className="text-3xl sm:text-5xl font-black text-white leading-snug">
                   &ldquo;{activeAnswer.content}&rdquo;
                 </p>
 
-                {activeAnswer.reveal_status === "revealed_correct" ? (
-                  <div className="inline-flex items-center gap-3 rounded-2xl bg-lime-400/20 border-2 border-lime-400 px-6 py-3.5 text-lime-300">
-                    <CheckCircle2 className="w-7 h-7" />
-                    <span className="text-3xl">
-                      {playerMap[activeAnswer.player_id]?.avatar || "🎉"}
-                    </span>
-                    <span className="text-2xl sm:text-3xl font-black text-white">
-                      {playerMap[activeAnswer.player_id]?.nickname || "Revealed!"}
-                    </span>
-                  </div>
-                ) : activeAnswer.reveal_status === "kept_anonymous" ? (
-                  <div className="inline-flex items-center gap-3 rounded-2xl bg-rose-500/20 border border-rose-400/40 px-6 py-3 text-rose-200">
-                    <EyeOff className="w-6 h-6" />
-                    <span className="text-xl font-bold">
-                      Wrong Guess — Identity Stays Secret!
-                    </span>
-                  </div>
-                ) : (
-                  <div className="inline-flex items-center gap-3 rounded-2xl bg-purple-950/80 border border-purple-400/30 px-6 py-3 text-purple-200">
-                    <EyeOff className="w-6 h-6 text-pink-400" />
-                    <span className="text-xl font-bold">
-                      Who wrote this? Play the 50-50 Ball!
-                    </span>
-                  </div>
-                )}
+                <div>
+                  {activeAnswer.reveal_status === "revealed_correct" ? (
+                    <div className="inline-flex items-center gap-3 rounded-2xl bg-lime-400/20 border-2 border-lime-400 px-6 py-3.5 text-lime-300">
+                      <CheckCircle2 className="w-7 h-7" />
+                      <span className="text-3xl">
+                        {playerMap[activeAnswer.player_id]?.avatar || "🎉"}
+                      </span>
+                      <span className="text-2xl sm:text-3xl font-black text-white">
+                        {playerMap[activeAnswer.player_id]?.nickname || "Revealed!"}
+                      </span>
+                    </div>
+                  ) : activeAnswer.reveal_status === "kept_anonymous" ? (
+                    <div className="inline-flex items-center gap-3 rounded-2xl bg-rose-500/20 border border-rose-400/40 px-6 py-3 text-rose-200">
+                      <EyeOff className="w-6 h-6" />
+                      <span className="text-xl font-bold">
+                        Wrong Guess — Identity Stays Secret!
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-3 rounded-2xl bg-purple-950/80 border border-purple-400/30 px-6 py-3 text-purple-200">
+                      <EyeOff className="w-6 h-6 text-pink-400" />
+                      <span className="text-xl font-bold">
+                        Who wrote this? Play the 50-50 Ball!
+                      </span>
+                    </div>
+                  )}
+                </div>
               </motion.div>
             )}
           </AnimatePresence>

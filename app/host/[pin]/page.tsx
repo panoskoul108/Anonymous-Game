@@ -26,6 +26,10 @@ import {
   Pencil,
   RotateCcw,
   X,
+  Lock,
+  Unlock,
+  SkipForward,
+  Zap,
 } from "lucide-react";
 
 type TabType = "round" | "library" | "suggestions" | "players";
@@ -48,13 +52,19 @@ export default function HostDashboardPage() {
   const [copiedLink, setCopiedLink] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
   const [joinUrl, setJoinUrl] = useState("");
+  const [isRoomLocked, setIsRoomLocked] = useState(false);
 
   // Round setup state
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>("");
+  const [quickCustomQuestion, setQuickCustomQuestion] = useState<string>("");
   const [targetMode, setTargetMode] = useState<"all" | "selected">("all");
   const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
   const [playerSearch, setPlayerSearch] = useState("");
   const [showAnswersOnScreen, setShowAnswersOnScreen] = useState<boolean>(false);
+
+  // 50-50 Guesser & Skipped cards (ephemeral live session state)
+  const [guesserId, setGuesserId] = useState<string>("");
+  const [skippedAnswerIds, setSkippedAnswerIds] = useState<string[]>([]);
 
   // Library & question editing
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
@@ -194,6 +204,12 @@ export default function HostDashboardPage() {
     supabase.removeChannel(ch);
   };
 
+  const handleToggleRoomLock = async () => {
+    const nextLocked = !isRoomLocked;
+    setIsRoomLocked(nextLocked);
+    await broadcastEvent("room_lock_changed", { locked: nextLocked });
+  };
+
   const handleCopyJoinLink = async () => {
     if (!joinUrl) return;
     await navigator.clipboard.writeText(joinUrl);
@@ -207,6 +223,7 @@ export default function HostDashboardPage() {
     if (pool.length === 0) return;
     const randomQ = pool[Math.floor(Math.random() * pool.length)];
     setSelectedQuestionId(randomQ.id);
+    setQuickCustomQuestion("");
   };
 
   const handlePickRandomPlayers = (count: number) => {
@@ -216,17 +233,39 @@ export default function HostDashboardPage() {
   };
 
   const handleStartRound = async () => {
-    if (!room || !selectedQuestionId) return;
+    if (!room) return;
     if (targetMode === "selected" && selectedPlayerIds.length === 0) {
       alert("Select at least one player or switch to 'Everyone'.");
       return;
     }
 
+    let questionIdToUse = selectedQuestionId;
+
+    // On-the-spot custom question support
+    if (quickCustomQuestion.trim()) {
+      const { data: createdQ, error: qErr } = await supabase
+        .from("questions")
+        .insert({
+          room_id: room.id,
+          category: "funny",
+          text: quickCustomQuestion.trim(),
+          is_used: true,
+        })
+        .select()
+        .single();
+
+      if (qErr || !createdQ) return;
+      questionIdToUse = createdQ.id;
+      setQuickCustomQuestion("");
+    }
+
+    if (!questionIdToUse) return;
+
     const { data: newRound, error } = await supabase
       .from("rounds")
       .insert({
         room_id: room.id,
-        question_id: selectedQuestionId,
+        question_id: questionIdToUse,
         target_mode: targetMode,
         target_player_ids: targetMode === "selected" ? selectedPlayerIds : [],
       })
@@ -246,14 +285,28 @@ export default function HostDashboardPage() {
     await supabase
       .from("questions")
       .update({ is_used: true })
-      .eq("id", selectedQuestionId);
+      .eq("id", questionIdToUse);
 
-    // Auto-select next unused question for convenience
-    const nextUnused = questions.find((q) => !q.is_used && q.id !== selectedQuestionId);
+    const nextUnused = questions.find((q) => !q.is_used && q.id !== questionIdToUse);
     if (nextUnused) setSelectedQuestionId(nextUnused.id);
 
     setShowAnswersOnScreen(false);
+    setGuesserId("");
+    setSkippedAnswerIds([]);
     await broadcastEvent("round_started", { roundId: newRound.id });
+    await loadRoomData();
+  };
+
+  const handleResetRound = async () => {
+    if (!room) return;
+    await supabase
+      .from("rooms")
+      .update({ status: "lobby", current_round_id: null })
+      .eq("id", room.id);
+    setShowAnswersOnScreen(false);
+    setGuesserId("");
+    setSkippedAnswerIds([]);
+    await broadcastEvent("back_to_lobby", {});
     await loadRoomData();
   };
 
@@ -281,12 +334,13 @@ export default function HostDashboardPage() {
 
   const handleSelectActiveAnswer = async (answerId: string) => {
     if (!currentRound) return;
+    setGuesserId("");
     await supabase
       .from("rounds")
       .update({ active_answer_id: answerId })
       .eq("id", currentRound.id);
 
-    await broadcastEvent("active_answer_changed", { answerId });
+    await broadcastEvent("active_answer_changed", { answerId, guesser: null });
     await loadRoomData();
   };
 
@@ -294,6 +348,22 @@ export default function HostDashboardPage() {
     if (answers.length === 0) return;
     const nextIdx = (activeAnswerIndex + 1) % answers.length;
     await handleSelectActiveAnswer(answers[nextIdx].id);
+  };
+
+  const handleSkipAnswer = async (answerId: string) => {
+    setSkippedAnswerIds((prev) => (prev.includes(answerId) ? prev : [...prev, answerId]));
+    if (answers.length > 1) {
+      await handleNextAnswer();
+    }
+  };
+
+  const handleSelectGuesser = async (playerId: string) => {
+    setGuesserId(playerId);
+    const guesser = playerId ? playerMap[playerId] : null;
+    await broadcastEvent("guesser_selected", {
+      answerId: activeAnswer?.id,
+      guesser: guesser ? { nickname: guesser.nickname, avatar: guesser.avatar } : null,
+    });
   };
 
   const handle5050Result = async (answerId: string, isCorrect: boolean) => {
@@ -310,18 +380,12 @@ export default function HostDashboardPage() {
         .eq("id", room.id);
     }
 
-    await broadcastEvent("reveal_result", { answerId, isCorrect });
-    await loadRoomData();
-  };
-
-  const handleReturnToLobby = async () => {
-    if (!room) return;
-    await supabase
-      .from("rooms")
-      .update({ status: "lobby", current_round_id: null })
-      .eq("id", room.id);
-    setShowAnswersOnScreen(false);
-    await broadcastEvent("back_to_lobby", {});
+    const guesser = guesserId ? playerMap[guesserId] : null;
+    await broadcastEvent("reveal_result", {
+      answerId,
+      isCorrect,
+      guesser: guesser ? { nickname: guesser.nickname, avatar: guesser.avatar } : null,
+    });
     await loadRoomData();
   };
 
@@ -429,11 +493,24 @@ export default function HostDashboardPage() {
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            onClick={handleToggleRoomLock}
+            className={`rounded-xl border px-3 py-2 text-xs font-bold flex items-center gap-1.5 cursor-pointer ${
+              isRoomLocked
+                ? "bg-amber-500/20 border-amber-400/50 text-amber-200"
+                : "bg-[#130b29] border-purple-500/30 text-purple-200"
+            }`}
+            title="Lock or unlock new players joining"
+          >
+            {isRoomLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+            {isRoomLocked ? "Room Locked" : "Room Open"}
+          </button>
+
+          <button
             onClick={handleCopyJoinLink}
             className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3 py-2 text-xs font-semibold text-purple-200 flex items-center gap-1.5 cursor-pointer"
           >
             {copiedLink ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5" />}
-            {copiedLink ? "Copied!" : "Copy Invite Link"}
+            {copiedLink ? "Copied!" : "Invite Link"}
           </button>
 
           <button
@@ -449,11 +526,11 @@ export default function HostDashboardPage() {
             className="rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 px-3.5 py-2 text-xs font-bold text-cyan-200 flex items-center gap-1.5 cursor-pointer"
           >
             <Tv className="w-4 h-4" />
-            Open Big Screen
+            Big Screen
           </button>
 
           <button
-            onClick={handleReturnToLobby}
+            onClick={handleResetRound}
             className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3.5 py-2 text-xs font-semibold text-purple-200 cursor-pointer"
           >
             Lobby
@@ -472,7 +549,7 @@ export default function HostDashboardPage() {
           }`}
         >
           <Sparkles className="w-4 h-4" />
-          Round & 50-50
+          Round &amp; 50-50
         </button>
 
         <button
@@ -523,7 +600,6 @@ export default function HostDashboardPage() {
                 type="button"
                 onClick={handlePickRandomUnusedQuestion}
                 className="rounded-xl bg-purple-900/60 hover:bg-purple-800/70 border border-purple-400/30 px-3 py-1.5 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer"
-                title="Pick Random Unused Question"
               >
                 <Shuffle className="w-3.5 h-3.5" />
                 Random Q
@@ -531,13 +607,14 @@ export default function HostDashboardPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-purple-200/80 mb-2">
-                Select Question
+              <label className="block text-xs font-semibold text-purple-200/80 mb-1.5">
+                Pick from Library
               </label>
               <select
                 value={selectedQuestionId}
+                disabled={Boolean(quickCustomQuestion.trim())}
                 onChange={(e) => setSelectedQuestionId(e.target.value)}
-                className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-3.5 py-3 text-sm text-white focus:outline-none focus:border-cyan-400"
+                className="w-full rounded-xl bg-[#090514] border border-purple-500/30 px-3.5 py-3 text-sm text-white disabled:opacity-40 focus:outline-none focus:border-cyan-400"
               >
                 {questions.map((q) => (
                   <option key={q.id} value={q.id}>
@@ -545,6 +622,20 @@ export default function HostDashboardPage() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300/90 mb-1.5">
+                <Zap className="w-3.5 h-3.5" />
+                Or Quick Custom Question (On the Spot)
+              </label>
+              <input
+                type="text"
+                value={quickCustomQuestion}
+                onChange={(e) => setQuickCustomQuestion(e.target.value)}
+                placeholder="Type an instant question..."
+                className="w-full rounded-xl bg-[#090514] border border-amber-400/30 px-3.5 py-2.5 text-sm text-white placeholder:text-purple-400/40 focus:outline-none focus:border-amber-400"
+              />
             </div>
 
             <div>
@@ -611,7 +702,7 @@ export default function HostDashboardPage() {
                   className="w-full rounded-xl bg-[#090514] border border-purple-500/25 px-3 py-2 text-xs text-white"
                 />
 
-                <div className="max-h-48 overflow-y-auto rounded-2xl bg-[#090514] border border-purple-500/25 p-2.5 space-y-1">
+                <div className="max-h-44 overflow-y-auto rounded-2xl bg-[#090514] border border-purple-500/25 p-2.5 space-y-1">
                   {filteredPlayers.map((p) => {
                     const checked = selectedPlayerIds.includes(p.id);
                     return (
@@ -696,6 +787,13 @@ export default function HostDashboardPage() {
                         Hide Answers
                       </button>
                     )}
+
+                    <button
+                      onClick={handleResetRound}
+                      className="rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/30 text-rose-200 font-bold text-xs px-3 py-2.5 cursor-pointer"
+                    >
+                      End Round
+                    </button>
                   </div>
 
                   {showAnswersOnScreen && answers.length > 1 && (
@@ -709,7 +807,28 @@ export default function HostDashboardPage() {
                   )}
                 </div>
 
-                {/* Answers List (Host sees author identity privately) */}
+                {/* Optional 50-50 Guesser Selector */}
+                {showAnswersOnScreen && activeAnswer && (
+                  <div className="rounded-2xl bg-[#090514] border border-purple-500/25 p-3.5 flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs font-bold text-purple-200">
+                      🎯 Who is guessing the 50-50 ball? (Optional)
+                    </span>
+                    <select
+                      value={guesserId}
+                      onChange={(e) => handleSelectGuesser(e.target.value)}
+                      className="rounded-xl bg-[#130b29] border border-cyan-400/40 px-3 py-1.5 text-xs text-white"
+                    >
+                      <option value="">-- No Guesser Selected --</option>
+                      {players.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.avatar} {p.nickname}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Answers List */}
                 <div className="space-y-3">
                   {answers.length === 0 ? (
                     <div className="rounded-2xl bg-[#090514]/70 border border-purple-500/20 p-6 text-center text-sm text-purple-300/60">
@@ -719,6 +838,7 @@ export default function HostDashboardPage() {
                     answers.map((ans, idx) => {
                       const author = playerMap[ans.player_id];
                       const isSelectedCard = activeAnswer?.id === ans.id;
+                      const isSkipped = skippedAnswerIds.includes(ans.id);
 
                       return (
                         <div
@@ -727,12 +847,15 @@ export default function HostDashboardPage() {
                           className={`rounded-2xl p-4 border transition cursor-pointer ${
                             isSelectedCard
                               ? "bg-[#1c103b] border-cyan-400 shadow-lg"
+                              : isSkipped
+                              ? "bg-[#090514]/40 border-purple-500/10 opacity-60"
                               : "bg-[#090514]/80 border-purple-500/20 hover:border-purple-400/40"
                           }`}
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                             <span className="text-xs font-bold uppercase text-purple-300/70">
-                              Answer #{idx + 1} {isSelectedCard && "• (On Big Screen)"}
+                              Answer #{idx + 1} {isSelectedCard && "• (On Big Screen)"}{" "}
+                              {isSkipped && "• (Skipped)"}
                             </span>
                             <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30">
                               Author (Host Only): {author?.avatar} {author?.nickname || "Unknown"}
@@ -755,7 +878,7 @@ export default function HostDashboardPage() {
                               </strong>
                             </span>
 
-                            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
                               <button
                                 onClick={() => handle5050Result(ans.id, true)}
                                 className="rounded-xl bg-lime-400/20 hover:bg-lime-400/30 border border-lime-400/50 text-lime-300 px-3 py-1.5 text-xs font-bold flex items-center gap-1 cursor-pointer"
@@ -769,6 +892,14 @@ export default function HostDashboardPage() {
                               >
                                 <XCircle className="w-3.5 h-3.5" />
                                 Wrong (Anonymous)
+                              </button>
+                              <button
+                                onClick={() => handleSkipAnswer(ans.id)}
+                                className="rounded-xl bg-purple-900/50 hover:bg-purple-800/60 border border-purple-400/30 text-purple-200 px-2.5 py-1.5 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                title="Skip to next answer"
+                              >
+                                <SkipForward className="w-3.5 h-3.5" />
+                                Skip
                               </button>
                             </div>
                           </div>
@@ -792,9 +923,9 @@ export default function HostDashboardPage() {
               onChange={(e) => setNewQuestionCategory(e.target.value as any)}
               className="rounded-xl bg-[#090514] border border-purple-500/30 px-3.5 py-3 text-sm text-white"
             >
-              <option value="flirting">😏 Flirting & Attraction</option>
-              <option value="spicy">🌶️ Spicy & Dating</option>
-              <option value="funny">😂 Funny & Unexpected</option>
+              <option value="flirting">😏 Flirting &amp; Attraction</option>
+              <option value="spicy">🌶️ Spicy &amp; Dating</option>
+              <option value="funny">😂 Funny &amp; Unexpected</option>
             </select>
             <input
               type="text"
@@ -878,6 +1009,7 @@ export default function HostDashboardPage() {
                     <button
                       onClick={() => {
                         setSelectedQuestionId(q.id);
+                        setQuickCustomQuestion("");
                         setActiveTab("round");
                       }}
                       className="rounded-lg bg-cyan-500/15 border border-cyan-400/30 px-3 py-1.5 text-xs font-semibold text-cyan-200 cursor-pointer"
