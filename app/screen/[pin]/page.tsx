@@ -58,6 +58,14 @@ function playGameSound(type: "pop" | "reveal_win" | "reveal_lose", muted: boolea
   }
 }
 
+function ScreenAvatar({ p, size = "md" }: { p: any; size?: "sm" | "md" | "lg" }) {
+  const dim = size === "lg" ? "w-11 h-11 text-3xl" : size === "sm" ? "w-5 h-5 text-xs" : "w-8 h-8 text-xl";
+  if (p?.avatar_url) {
+    return <img src={p.avatar_url} alt={p.nickname || "Player"} className={`${dim} rounded-full object-cover border border-cyan-400/50 shrink-0`} />;
+  }
+  return <span className={size === "lg" ? "text-3xl" : size === "sm" ? "text-xs" : "text-xl"}>{p?.avatar || "🦊"}</span>;
+}
+
 export default function BigScreenPage() {
   const params = useParams<{ pin: string }>();
   const pin = params.pin;
@@ -98,7 +106,7 @@ export default function BigScreenPage() {
 
     const { data: playersData } = await supabase
       .from("players")
-      .select("id, nickname, avatar")
+      .select("id, nickname, avatar, avatar_url")
       .eq("room_id", roomData.id)
       .order("created_at", { ascending: true });
     setPlayers(playersData || []);
@@ -298,7 +306,7 @@ export default function BigScreenPage() {
                   key={p.id}
                   className="rounded-2xl bg-[#130b29] border border-fuchsia-500/30 px-4 py-2 flex items-center gap-2 text-base font-bold"
                 >
-                  <span className="text-xl">{p.avatar}</span>
+                  <ScreenAvatar p={p} />
                   <span>{p.nickname}</span>
                 </div>
               ))}
@@ -384,9 +392,7 @@ export default function BigScreenPage() {
                   {activeAnswer.reveal_status === "revealed_correct" ? (
                     <div className="inline-flex items-center gap-3 rounded-2xl bg-lime-400/20 border-2 border-lime-400 px-6 py-3.5 text-lime-300">
                       <CheckCircle2 className="w-7 h-7" />
-                      <span className="text-3xl">
-                        {playerMap[activeAnswer.player_id]?.avatar || "🎉"}
-                      </span>
+                      <ScreenAvatar p={playerMap[activeAnswer.player_id]} size="lg" />
                       <span className="text-2xl sm:text-3xl font-black text-white">
                         {playerMap[activeAnswer.player_id]?.nickname || "Revealed!"}
                       </span>
@@ -431,7 +437,7 @@ export default function BigScreenPage() {
                     <span className="font-bold text-purple-300/70">#{idx + 1}</span>
                     {revealedAuthor ? (
                       <span className="font-bold text-lime-300">
-                        {revealedAuthor.avatar} {revealedAuthor.nickname}
+                        <span className="inline-flex items-center gap-1"><ScreenAvatar p={revealedAuthor} size="sm" /><span>{revealedAuthor.nickname}</span></span>
                       </span>
                     ) : (
                       <span className="text-pink-300/80 font-semibold">Anonymous</span>

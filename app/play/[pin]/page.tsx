@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X, EyeOff, Lock } from "lucide-react";
+import { Send, Lightbulb, CheckCircle2, Clock, Sparkles, X, EyeOff, Lock, Camera } from "lucide-react";
 
 const AVATARS = [
   "🦊", "🐺", "🦁", "🐼", "🦄", "🐙",
@@ -13,6 +13,55 @@ const AVATARS = [
   "👽", "🤖", "👻", "💎", "🌙", "🍄",
 ];
 const REACTIONS = ["😂", "👀", "🤯", "❤️", "🔥"];
+
+async function compressImageToBlob(file: File, maxSize = 240): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const scale = Math.min(maxSize / img.width, maxSize / img.height, 1);
+      const width = Math.max(1, Math.round(img.width * scale));
+      const height = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas not supported"));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("Image compression failed"));
+        },
+        "image/jpeg",
+        0.82
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Could not load image"));
+    };
+    img.src = objectUrl;
+  });
+}
+
+function PlayerBadge({ p, size = "md" }: { p: any; size?: "sm" | "md" }) {
+  const dim = size === "sm" ? "w-6 h-6 text-sm" : "w-9 h-9 text-xl";
+  if (p?.avatar_url) {
+    return (
+      <img
+        src={p.avatar_url}
+        alt={p.nickname || "Player"}
+        className={`${dim} rounded-full object-cover border border-cyan-400/50 shrink-0`}
+      />
+    );
+  }
+  return <span className={size === "sm" ? "text-base" : "text-2xl"}>{p?.avatar || "🦊"}</span>;
+}
 
 export default function PlayerRoomPage() {
   const params = useParams<{ pin: string }>();
@@ -29,6 +78,8 @@ export default function PlayerRoomPage() {
   // Join form
   const [nickname, setNickname] = useState("");
   const [avatar, setAvatar] = useState(AVATARS[0]);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -43,7 +94,6 @@ export default function PlayerRoomPage() {
   const [suggestText, setSuggestText] = useState("");
   const [suggestSent, setSuggestSent] = useState(false);
 
-  // Persistent broadcast channel for instant reactions & sync
   const gameChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const [channelReady, setChannelReady] = useState(false);
 
@@ -55,12 +105,19 @@ export default function PlayerRoomPage() {
     return map;
   }, [players]);
 
+  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setPhotoFile(file);
+    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+    setPhotoPreviewUrl(file ? URL.createObjectURL(file) : null);
+  };
+
   const loadGameState = useCallback(async (roomData: any, currentPlayer: any) => {
     if (!roomData) return;
 
     const { data: pList } = await supabase
       .from("players")
-      .select("id, nickname, avatar")
+      .select("id, nickname, avatar, avatar_url")
       .eq("room_id", roomData.id);
     setPlayers(pList || []);
 
@@ -157,7 +214,6 @@ export default function PlayerRoomPage() {
     initRoomAndSession();
   }, [initRoomAndSession]);
 
-  // Persistent broadcast channel per room PIN
   useEffect(() => {
     if (!pin) return;
 
@@ -225,6 +281,27 @@ export default function PlayerRoomPage() {
     setErrorMsg(null);
 
     const sessionToken = crypto.randomUUID();
+    let uploadedAvatarUrl: string | null = null;
+
+    if (photoFile) {
+      try {
+        const compressedBlob = await compressImageToBlob(photoFile, 240);
+        const filePath = `${room.id}/${sessionToken}.jpg`;
+        const { error: uploadErr } = await supabase.storage
+          .from("avatars")
+          .upload(filePath, compressedBlob, {
+            contentType: "image/jpeg",
+            upsert: true,
+          });
+
+        if (!uploadErr) {
+          const { data: pubData } = supabase.storage.from("avatars").getPublicUrl(filePath);
+          uploadedAvatarUrl = pubData?.publicUrl || null;
+        }
+      } catch {
+        // Fallback to emoji if image upload/compression fails
+      }
+    }
 
     const { data: newPlayer, error } = await supabase
       .from("players")
@@ -232,6 +309,7 @@ export default function PlayerRoomPage() {
         room_id: room.id,
         nickname: nickname.trim(),
         avatar,
+        avatar_url: uploadedAvatarUrl,
         session_token: sessionToken,
         is_online: true,
       })
@@ -398,7 +476,7 @@ export default function PlayerRoomPage() {
               <div>
                 <h1 className="text-2xl font-black text-white">Join the Room</h1>
                 <p className="text-xs text-purple-200/75 mt-1">
-                  Pick a nickname and avatar to play.
+                  Pick a nickname, upload a photo or choose an avatar.
                 </p>
               </div>
 
@@ -417,18 +495,65 @@ export default function PlayerRoomPage() {
                 />
               </div>
 
+              {/* Photo Avatar Upload */}
               <div>
                 <label className="block text-xs font-semibold text-purple-200/80 mb-2">
-                  Avatar
+                  Photo Avatar (Camera or Gallery)
                 </label>
-                <div className="grid grid-cols-6 gap-2 max-h-44 overflow-y-auto p-1">
+                <div className="flex items-center gap-3">
+                  {photoPreviewUrl ? (
+                    <img
+                      src={photoPreviewUrl}
+                      alt="Preview"
+                      className="w-14 h-14 rounded-full object-cover border-2 border-cyan-400 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-14 h-14 rounded-full bg-[#090514] border border-purple-500/30 flex items-center justify-center text-2xl shrink-0">
+                      {avatar}
+                    </div>
+                  )}
+
+                  <label className="flex-1 rounded-xl bg-[#090514] hover:bg-purple-950/60 border border-dashed border-cyan-400/50 px-3.5 py-2.5 text-xs font-bold text-cyan-200 flex items-center justify-center gap-2 cursor-pointer">
+                    <Camera className="w-4 h-4 text-pink-400" />
+                    {photoFile ? "Change Photo" : "Take / Upload Photo"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="user"
+                      onChange={handlePhotoChange}
+                      className="hidden"
+                    />
+                  </label>
+
+                  {photoFile && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPhotoFile(null);
+                        if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
+                        setPhotoPreviewUrl(null);
+                      }}
+                      className="rounded-xl bg-rose-500/15 border border-rose-400/30 p-2 text-rose-200 cursor-pointer"
+                      title="Remove photo"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-purple-200/80 mb-2">
+                  Or Fallback Emoji Avatar
+                </label>
+                <div className="grid grid-cols-6 gap-2 max-h-36 overflow-y-auto p-1">
                   {AVATARS.map((av) => (
                     <button
                       key={av}
                       type="button"
                       onClick={() => setAvatar(av)}
                       className={`h-10 rounded-xl text-xl flex items-center justify-center border cursor-pointer transition ${
-                        avatar === av
+                        avatar === av && !photoPreviewUrl
                           ? "bg-cyan-400/20 border-cyan-400 scale-105"
                           : "bg-[#090514] border-purple-500/20"
                       }`}
@@ -455,7 +580,7 @@ export default function PlayerRoomPage() {
           <div className="space-y-4">
             <div className="rounded-2xl bg-[#130b29] border border-purple-500/25 px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <span className="text-2xl">{player.avatar}</span>
+                <PlayerBadge p={player} />
                 <div>
                   <div className="text-sm font-bold text-white">{player.nickname}</div>
                   <div className="text-[11px] text-lime-400">● Connected</div>
@@ -466,7 +591,6 @@ export default function PlayerRoomPage() {
               </span>
             </div>
 
-            {/* Active Answering Phase */}
             {room.status === "answering" && round ? (
               <div className="rounded-3xl bg-[#130b29] border border-fuchsia-500/35 p-6 space-y-5 shadow-2xl">
                 <div>
@@ -537,7 +661,7 @@ export default function PlayerRoomPage() {
 
                 {activeAnswer.reveal_status === "revealed_correct" ? (
                   <div className="inline-flex items-center gap-2 rounded-xl bg-lime-400/20 border border-lime-400 px-4 py-2 text-sm font-bold text-lime-200">
-                    <span>{playerMap[activeAnswer.player_id]?.avatar}</span>
+                    <PlayerBadge p={playerMap[activeAnswer.player_id]} size="sm" />
                     <span>{playerMap[activeAnswer.player_id]?.nickname}</span>
                   </div>
                 ) : activeAnswer.reveal_status === "kept_anonymous" ? (
@@ -551,7 +675,6 @@ export default function PlayerRoomPage() {
                   </p>
                 )}
 
-                {/* Anonymous Live Reactions */}
                 <div className="pt-2 border-t border-purple-500/20">
                   <div className="text-[11px] text-purple-300/60 mb-2">
                     Send anonymous reaction to Big Screen

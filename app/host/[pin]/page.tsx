@@ -30,9 +30,24 @@ import {
   Unlock,
   SkipForward,
   Zap,
+  Disc,
 } from "lucide-react";
 
 type TabType = "round" | "library" | "suggestions" | "players";
+
+function AvatarThumb({ p, size = "md" }: { p: any; size?: "sm" | "md" }) {
+  const dim = size === "sm" ? "w-6 h-6 text-sm" : "w-9 h-9 text-xl";
+  if (p?.avatar_url) {
+    return (
+      <img
+        src={p.avatar_url}
+        alt={p.nickname || "Player"}
+        className={`${dim} rounded-full object-cover border border-cyan-400/50 shrink-0`}
+      />
+    );
+  }
+  return <span className={size === "sm" ? "text-base" : "text-2xl"}>{p?.avatar || "🦊"}</span>;
+}
 
 export default function HostDashboardPage() {
   const params = useParams<{ pin: string }>();
@@ -54,6 +69,15 @@ export default function HostDashboardPage() {
   const [joinUrl, setJoinUrl] = useState("");
   const [isRoomLocked, setIsRoomLocked] = useState(false);
 
+  // Spin Wheel state
+  const [showWheelModal, setShowWheelModal] = useState(false);
+  const [wheelMode, setWheelMode] = useState<"question" | "fifty">("question");
+  const [wheelAngle, setWheelAngle] = useState(0);
+  const [spinning, setSpinning] = useState(false);
+  const [wheelResultText, setWheelResultText] = useState<string | null>(null);
+  const [wheelPickedQuestionId, setWheelPickedQuestionId] = useState<string | null>(null);
+  const [wheelPicked5050, setWheelPicked5050] = useState<boolean | null>(null);
+
   // Round setup state
   const [selectedQuestionId, setSelectedQuestionId] = useState<string>("");
   const [quickCustomQuestion, setQuickCustomQuestion] = useState<string>("");
@@ -62,7 +86,7 @@ export default function HostDashboardPage() {
   const [playerSearch, setPlayerSearch] = useState("");
   const [showAnswersOnScreen, setShowAnswersOnScreen] = useState<boolean>(false);
 
-  // 50-50 Guesser & Skipped cards (ephemeral live session state)
+  // 50-50 Guesser & Skipped cards
   const [guesserId, setGuesserId] = useState<string>("");
   const [skippedAnswerIds, setSkippedAnswerIds] = useState<string[]>([]);
 
@@ -204,6 +228,43 @@ export default function HostDashboardPage() {
     supabase.removeChannel(ch);
   };
 
+  const openSpinWheel = (mode: "question" | "fifty") => {
+    setWheelMode(mode);
+    setWheelResultText(null);
+    setWheelPickedQuestionId(null);
+    setWheelPicked5050(null);
+    setShowWheelModal(true);
+  };
+
+  const handleSpinWheel = () => {
+    if (spinning) return;
+    setSpinning(true);
+    setWheelResultText(null);
+    setWheelPickedQuestionId(null);
+    setWheelPicked5050(null);
+
+    const extraSpins = 5 * 360 + Math.floor(Math.random() * 360);
+    const nextAngle = wheelAngle + extraSpins;
+    setWheelAngle(nextAngle);
+
+    setTimeout(() => {
+      if (wheelMode === "question") {
+        const unused = questions.filter((q) => !q.is_used);
+        const pool = unused.length > 0 ? unused : questions;
+        if (pool.length > 0) {
+          const picked = pool[Math.floor(Math.random() * pool.length)];
+          setWheelPickedQuestionId(picked.id);
+          setWheelResultText(picked.text);
+        }
+      } else {
+        const isReveal = Math.random() < 0.5;
+        setWheelPicked5050(isReveal);
+        setWheelResultText(isReveal ? "REVEAL IDENTITY (Correct)" : "STAY ANONYMOUS (Wrong)");
+      }
+      setSpinning(false);
+    }, 1700);
+  };
+
   const handleToggleRoomLock = async () => {
     const nextLocked = !isRoomLocked;
     setIsRoomLocked(nextLocked);
@@ -241,7 +302,6 @@ export default function HostDashboardPage() {
 
     let questionIdToUse = selectedQuestionId;
 
-    // On-the-spot custom question support
     if (quickCustomQuestion.trim()) {
       const { data: createdQ, error: qErr } = await supabase
         .from("questions")
@@ -362,7 +422,9 @@ export default function HostDashboardPage() {
     const guesser = playerId ? playerMap[playerId] : null;
     await broadcastEvent("guesser_selected", {
       answerId: activeAnswer?.id,
-      guesser: guesser ? { nickname: guesser.nickname, avatar: guesser.avatar } : null,
+      guesser: guesser
+        ? { nickname: guesser.nickname, avatar: guesser.avatar, avatar_url: guesser.avatar_url || null }
+        : null,
     });
   };
 
@@ -384,7 +446,9 @@ export default function HostDashboardPage() {
     await broadcastEvent("reveal_result", {
       answerId,
       isCorrect,
-      guesser: guesser ? { nickname: guesser.nickname, avatar: guesser.avatar } : null,
+      guesser: guesser
+        ? { nickname: guesser.nickname, avatar: guesser.avatar, avatar_url: guesser.avatar_url || null }
+        : null,
     });
     await loadRoomData();
   };
@@ -493,16 +557,23 @@ export default function HostDashboardPage() {
 
         <div className="flex flex-wrap items-center gap-2">
           <button
+            onClick={() => openSpinWheel(activeAnswer ? "fifty" : "question")}
+            className="rounded-xl bg-gradient-to-r from-pink-500/25 to-cyan-400/25 hover:from-pink-500/35 hover:to-cyan-400/35 border border-pink-400/40 px-3 py-2 text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer"
+          >
+            <Disc className="w-3.5 h-3.5 text-pink-400" />
+            Spin Wheel
+          </button>
+
+          <button
             onClick={handleToggleRoomLock}
             className={`rounded-xl border px-3 py-2 text-xs font-bold flex items-center gap-1.5 cursor-pointer ${
               isRoomLocked
                 ? "bg-amber-500/20 border-amber-400/50 text-amber-200"
                 : "bg-[#130b29] border-purple-500/30 text-purple-200"
             }`}
-            title="Lock or unlock new players joining"
           >
             {isRoomLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-            {isRoomLocked ? "Room Locked" : "Room Open"}
+            {isRoomLocked ? "Locked" : "Open"}
           </button>
 
           <button
@@ -510,7 +581,7 @@ export default function HostDashboardPage() {
             className="rounded-xl bg-[#130b29] hover:bg-purple-900/40 border border-purple-500/30 px-3 py-2 text-xs font-semibold text-purple-200 flex items-center gap-1.5 cursor-pointer"
           >
             {copiedLink ? <Check className="w-3.5 h-3.5 text-lime-400" /> : <Copy className="w-3.5 h-3.5" />}
-            {copiedLink ? "Copied!" : "Invite Link"}
+            {copiedLink ? "Copied!" : "Invite"}
           </button>
 
           <button
@@ -592,18 +663,27 @@ export default function HostDashboardPage() {
       {/* TAB 1: ROUND & 50-50 */}
       {activeTab === "round" && (
         <div className="grid lg:grid-cols-12 gap-6">
-          {/* Left Column: Setup New Round */}
           <div className="lg:col-span-5 rounded-3xl bg-[#130b29] border border-fuchsia-500/30 p-6 space-y-5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <h2 className="text-lg font-bold text-white">Start New Round</h2>
-              <button
-                type="button"
-                onClick={handlePickRandomUnusedQuestion}
-                className="rounded-xl bg-purple-900/60 hover:bg-purple-800/70 border border-purple-400/30 px-3 py-1.5 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer"
-              >
-                <Shuffle className="w-3.5 h-3.5" />
-                Random Q
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => openSpinWheel("question")}
+                  className="rounded-xl bg-pink-500/20 hover:bg-pink-500/30 border border-pink-400/35 px-2.5 py-1.5 text-xs font-bold text-pink-200 flex items-center gap-1 cursor-pointer"
+                >
+                  <Disc className="w-3.5 h-3.5" />
+                  Wheel
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePickRandomUnusedQuestion}
+                  className="rounded-xl bg-purple-900/60 hover:bg-purple-800/70 border border-purple-400/30 px-2.5 py-1.5 text-xs font-bold text-cyan-300 flex items-center gap-1 cursor-pointer"
+                >
+                  <Shuffle className="w-3.5 h-3.5" />
+                  Random Q
+                </button>
+              </div>
             </div>
 
             <div>
@@ -711,7 +791,7 @@ export default function HostDashboardPage() {
                         className="flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-purple-950/50 cursor-pointer text-sm"
                       >
                         <span className="flex items-center gap-2">
-                          <span>{p.avatar}</span>
+                          <AvatarThumb p={p} size="sm" />
                           <span>{p.nickname}</span>
                         </span>
                         <input
@@ -741,7 +821,6 @@ export default function HostDashboardPage() {
             </button>
           </div>
 
-          {/* Right Column: Live Answers & 50-50 Controls */}
           <div className="lg:col-span-7 rounded-3xl bg-[#130b29] border border-purple-500/30 p-6 space-y-5">
             {!currentRound ? (
               <div className="py-16 text-center text-purple-300/60 text-sm">
@@ -766,7 +845,6 @@ export default function HostDashboardPage() {
                   </div>
                 </div>
 
-                {/* Quick Action Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap gap-2">
                     {!showAnswersOnScreen ? (
@@ -789,6 +867,14 @@ export default function HostDashboardPage() {
                     )}
 
                     <button
+                      onClick={() => openSpinWheel("fifty")}
+                      className="rounded-xl bg-pink-500/20 hover:bg-pink-500/30 border border-pink-400/40 text-pink-200 font-bold text-xs px-3 py-2.5 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Disc className="w-4 h-4" />
+                      50-50 Wheel
+                    </button>
+
+                    <button
                       onClick={handleResetRound}
                       className="rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/30 text-rose-200 font-bold text-xs px-3 py-2.5 cursor-pointer"
                     >
@@ -807,7 +893,6 @@ export default function HostDashboardPage() {
                   )}
                 </div>
 
-                {/* Optional 50-50 Guesser Selector */}
                 {showAnswersOnScreen && activeAnswer && (
                   <div className="rounded-2xl bg-[#090514] border border-purple-500/25 p-3.5 flex flex-wrap items-center justify-between gap-3">
                     <span className="text-xs font-bold text-purple-200">
@@ -828,7 +913,6 @@ export default function HostDashboardPage() {
                   </div>
                 )}
 
-                {/* Answers List */}
                 <div className="space-y-3">
                   {answers.length === 0 ? (
                     <div className="rounded-2xl bg-[#090514]/70 border border-purple-500/20 p-6 text-center text-sm text-purple-300/60">
@@ -857,8 +941,10 @@ export default function HostDashboardPage() {
                               Answer #{idx + 1} {isSelectedCard && "• (On Big Screen)"}{" "}
                               {isSkipped && "• (Skipped)"}
                             </span>
-                            <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30">
-                              Author (Host Only): {author?.avatar} {author?.nickname || "Unknown"}
+                            <span className="inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-lg bg-fuchsia-500/15 text-fuchsia-200 border border-fuchsia-500/30">
+                              <span>Author:</span>
+                              <AvatarThumb p={author} size="sm" />
+                              <span>{author?.nickname || "Unknown"}</span>
                             </span>
                           </div>
 
@@ -896,7 +982,6 @@ export default function HostDashboardPage() {
                               <button
                                 onClick={() => handleSkipAnswer(ans.id)}
                                 className="rounded-xl bg-purple-900/50 hover:bg-purple-800/60 border border-purple-400/30 text-purple-200 px-2.5 py-1.5 text-xs font-bold flex items-center gap-1 cursor-pointer"
-                                title="Skip to next answer"
                               >
                                 <SkipForward className="w-3.5 h-3.5" />
                                 Skip
@@ -1019,7 +1104,6 @@ export default function HostDashboardPage() {
                     <button
                       onClick={() => handleToggleQuestionUsed(q)}
                       className="rounded-lg bg-purple-900/50 border border-purple-500/30 p-2 text-purple-200 cursor-pointer"
-                      title={q.is_used ? "Mark as Unused" : "Mark as Used"}
                     >
                       <RotateCcw className="w-4 h-4" />
                     </button>
@@ -1029,14 +1113,12 @@ export default function HostDashboardPage() {
                         setEditingQuestionText(q.text);
                       }}
                       className="rounded-lg bg-purple-900/50 border border-purple-500/30 p-2 text-purple-200 cursor-pointer"
-                      title="Edit"
                     >
                       <Pencil className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleDeleteQuestion(q.id)}
                       className="rounded-lg bg-rose-500/15 border border-rose-400/30 p-2 text-rose-300 cursor-pointer"
-                      title="Delete"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1104,7 +1186,7 @@ export default function HostDashboardPage() {
                   className="rounded-2xl bg-[#090514] border border-purple-500/25 p-3.5 flex items-center justify-between"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-2xl">{p.avatar}</span>
+                    <AvatarThumb p={p} />
                     <div>
                       <div className="text-sm font-bold text-white">{p.nickname}</div>
                       <div className="text-[11px] text-purple-300/70">
@@ -1119,13 +1201,105 @@ export default function HostDashboardPage() {
                   <button
                     onClick={() => handleRemovePlayer(p.id)}
                     className="text-rose-400/70 hover:text-rose-300 p-1.5 cursor-pointer"
-                    title="Kick Player"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Spin Wheel Modal */}
+      {showWheelModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-3xl bg-[#130b29] border border-fuchsia-500/40 p-6 space-y-5 text-center">
+            <div className="flex items-center justify-between">
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => {
+                    setWheelMode("question");
+                    setWheelResultText(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
+                    wheelMode === "question" ? "bg-cyan-400 text-slate-950" : "bg-[#090514] text-purple-200"
+                  }`}
+                >
+                  Question Wheel
+                </button>
+                <button
+                  onClick={() => {
+                    setWheelMode("fifty");
+                    setWheelResultText(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold cursor-pointer ${
+                    wheelMode === "fifty" ? "bg-pink-500 text-white" : "bg-[#090514] text-purple-200"
+                  }`}
+                >
+                  50-50 Wheel
+                </button>
+              </div>
+              <button onClick={() => setShowWheelModal(false)} className="text-purple-300 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="relative mx-auto w-44 h-44 flex items-center justify-center">
+              <div className="absolute -top-2 text-2xl z-10">▼</div>
+              <div
+                style={{
+                  transform: `rotate(${wheelAngle}deg)`,
+                  transition: spinning ? "transform 1.7s cubic-bezier(0.18, 0.89, 0.32, 1)" : "none",
+                }}
+                className="w-40 h-40 rounded-full border-4 border-cyan-300 bg-[conic-gradient(#ec4899_0deg_90deg,#a855f7_90deg_180deg,#22d3ee_180deg_270deg,#a3e635_270deg_360deg)] flex items-center justify-center shadow-2xl"
+              >
+                <div className="w-14 h-14 rounded-full bg-[#090514] border-2 border-white flex items-center justify-center font-black text-xs text-white">
+                  {wheelMode === "question" ? "Q?" : "50/50"}
+                </div>
+              </div>
+            </div>
+
+            {wheelResultText && (
+              <div className="rounded-2xl bg-[#090514] border border-lime-400/40 p-3.5 text-sm font-bold text-white">
+                {wheelResultText}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleSpinWheel}
+                disabled={spinning}
+                className="flex-1 py-3 rounded-xl font-bold text-sm text-slate-950 bg-gradient-to-r from-pink-500 via-fuchsia-400 to-cyan-300 disabled:opacity-50 cursor-pointer"
+              >
+                {spinning ? "Spinning..." : "Spin Wheel"}
+              </button>
+
+              {wheelMode === "question" && wheelPickedQuestionId && !spinning && (
+                <button
+                  onClick={() => {
+                    setSelectedQuestionId(wheelPickedQuestionId);
+                    setQuickCustomQuestion("");
+                    setShowWheelModal(false);
+                  }}
+                  className="px-4 py-3 rounded-xl font-bold text-xs bg-lime-400 text-slate-950 cursor-pointer"
+                >
+                  Use Question
+                </button>
+              )}
+
+              {wheelMode === "fifty" && wheelPicked5050 !== null && activeAnswer && !spinning && (
+                <button
+                  onClick={async () => {
+                    await handle5050Result(activeAnswer.id, wheelPicked5050);
+                    setShowWheelModal(false);
+                  }}
+                  className="px-4 py-3 rounded-xl font-bold text-xs bg-lime-400 text-slate-950 cursor-pointer"
+                >
+                  Apply Result
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1138,10 +1312,7 @@ export default function HostDashboardPage() {
               <span className="text-xs font-bold uppercase tracking-widest text-cyan-300">
                 Scan to Join
               </span>
-              <button
-                onClick={() => setShowQrModal(false)}
-                className="text-purple-300 hover:text-white cursor-pointer"
-              >
+              <button onClick={() => setShowQrModal(false)} className="text-purple-300 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
